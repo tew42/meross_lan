@@ -24,11 +24,9 @@ Native format (the per-channel/per-subdevice dict carried in ns_value):
 Each native day sums to exactly 1440 minutes.
 
 Errors in user supplied data are raised as ScheduleValidationError carrying a
-stable `code` (usable as a translation key) and string `placeholders`.
-Programming errors (inconsistent device limits) are raised as plain ValueError.
+stable `code`. Programming errors (inconsistent device limits) are raised as
+plain ValueError.
 """
-
-from __future__ import annotations
 
 from collections.abc import Mapping
 import dataclasses
@@ -39,7 +37,7 @@ import typing
 
 if typing.TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
-    from typing import Any, Literal
+    from typing import Any
 
     HelperBlockType = Mapping[str, Any]
     HelperScheduleType = Mapping[str, Iterable[HelperBlockType] | None]
@@ -64,7 +62,7 @@ MINUTES_PER_DAY = 1440
 KEY_FROM = "from"
 KEY_TO = "to"
 KEY_DATA = "data"
-DEFAULT_TEMPERATURE_KEY = "temperature"
+KEY_TEMPERATURE = "temperature"
 
 _TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,6}))?)?$")
 
@@ -72,22 +70,13 @@ _TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,6}))?)?$")
 class ScheduleValidationError(ValueError):
     """
     Raised when a schedule (helper or native) cannot be converted.
-
-    - code: stable identifier of the error kind (usable as a translation key)
-    - placeholders: str -> str mapping with the details of the error
-      (weekday, range, index, value, ...)
-    - str(e): an English, human readable message
+    `code` is a stable identifier of the error kind while str(e) is an
+    English, human readable message.
     """
 
-    __slots__ = ("code", "placeholders")
-
-    code: str
-    placeholders: dict[str, str]
-
-    def __init__(self, code: str, message: str, /, **placeholders: str):
+    def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
-        self.placeholders = placeholders
 
 
 @dataclasses.dataclass(slots=True)
@@ -99,7 +88,7 @@ class CompileResult:
       snapping/clamping of temperatures, dropped blocks)
     """
 
-    native: NativeScheduleType
+    native: "NativeScheduleType"
     warnings: list[str]
 
 
@@ -121,12 +110,13 @@ def _round_half_up(value: float) -> int:
 
 
 def _round_to_unit(minutes: float, unit_time: int) -> int:
-    """Round minutes to the nearest multiple of unit_time (ties go up),
-    saturating at end of day."""
-    return min(MINUTES_PER_DAY, _round_half_up(minutes / unit_time) * unit_time)
+    """Round minutes to the nearest multiple of unit_time (ties go up).
+    Since minutes <= 1440 and unit_time divides 1440 the result never
+    exceeds 1440."""
+    return _round_half_up(minutes / unit_time) * unit_time
 
 
-def normalize_time(value: Any) -> float:
+def normalize_time(value: "Any") -> float:
     """
     Convert a schedule boundary to (possibly fractional) minutes since midnight.
 
@@ -141,16 +131,14 @@ def normalize_time(value: Any) -> float:
         hour, minute, second, fraction = match.groups()
         h, m, s = int(hour), int(minute), int(second or 0)
         us = int((fraction or "0").ljust(6, "0"))
-        if h == 24 and m == 0 and s == 0 and us == 0:
+        if (h, m, s, us) == (24, 0, 0, 0):
             return float(MINUTES_PER_DAY)
         if h > 23 or m > 59 or s > 59:
             raise ScheduleValidationError(
-                "time_invalid", f"Invalid time value: {value!r}", value=repr(value)
+                "time_invalid", f"Invalid time value: {value!r}"
             )
     else:
-        raise ScheduleValidationError(
-            "time_invalid", f"Invalid time value: {value!r}", value=repr(value)
-        )
+        raise ScheduleValidationError("time_invalid", f"Invalid time value: {value!r}")
     if (h, m, s, us) == (23, 59, 59, 999999):
         # time.max is how HA represents 24:00
         return float(MINUTES_PER_DAY)
@@ -158,14 +146,16 @@ def normalize_time(value: Any) -> float:
 
 
 def normalize_temperature(
-    value: Any, *, scale: int, min_temp: float, max_temp: float, temp_step: float
+    value: "Any", *, scale: int, min_temp: float, max_temp: float, temp_step: float
 ) -> tuple[int, str | None]:
     """
     Convert a temperature (number or numeric string) to the device scaled int.
 
-    The value is scaled (round half up), snapped to temp_step (in the scaled
-    domain, only when the scaled step is > 1) and clamped to [min_temp, max_temp].
-    Returns (scaled, warning) where warning is None when no adjustment was needed.
+    The value is scaled and snapped to temp_step (in the scaled domain, only
+    when the scaled step is > 1) with a single round half up, then clamped to
+    [min_temp, max_temp].
+    Returns (scaled, warning) where warning is None when the result is exactly
+    the input value.
     Raises ScheduleValidationError("temperature_invalid") for booleans,
     unparsable or non finite values.
     """
@@ -173,32 +163,28 @@ def normalize_temperature(
         if isinstance(value, bool):
             raise TypeError
         temperature = float(value)
+        if not math.isfinite(temperature):
+            raise ValueError
     except (TypeError, ValueError):
         raise ScheduleValidationError(
-            "temperature_invalid", f"Invalid temperature: {value!r}", value=repr(value)
+            "temperature_invalid", f"Invalid temperature: {value!r}"
         ) from None
-    if not math.isfinite(temperature):
-        raise ScheduleValidationError(
-            "temperature_invalid", f"Invalid temperature: {value!r}", value=repr(value)
-        )
-    scaled = _round_half_up(temperature * scale)
-    result = scaled
-    step_scaled = _round_half_up(temp_step * scale) if temp_step else 0
+    step_scaled = _round_half_up(temp_step * scale)
     if step_scaled > 1:
-        result = _round_half_up(result / step_scaled) * step_scaled
-    min_scaled = _round_half_up(min_temp * scale)
-    max_scaled = _round_half_up(max_temp * scale)
-    result = max(min_scaled, min(max_scaled, result))
-    warning = (
-        None
-        if result == scaled
-        else f"temperature {temperature:g} adjusted to {result / scale:g}"
+        result = _round_half_up(temperature * scale / step_scaled) * step_scaled
+    else:
+        result = _round_half_up(temperature * scale)
+    result = max(
+        _round_half_up(min_temp * scale),
+        min(_round_half_up(max_temp * scale), result),
     )
-    return result, warning
+    if result / scale == temperature:
+        return result, None
+    return result, f"temperature {temperature:g} adjusted to {result / scale:g}"
 
 
 def compile_schedule(
-    helper: HelperScheduleType,
+    helper: "HelperScheduleType",
     *,
     scale: int,
     min_temp: float,
@@ -207,16 +193,13 @@ def compile_schedule(
     unit_time: int = 15,
     entry_count_max: int = 0,
     entry_count_min: int = 0,
-    gap_temperature: float | None = None,
-    block_temperature_default: float | None = None,
-    temperature_key: str = DEFAULT_TEMPERATURE_KEY,
 ) -> CompileResult:
     """
     Compile an HA schedule helper representation into the native device payload.
 
-    - helper: {"monday": [{"from", "to", "data": {temperature_key: T}}], ...}
-      weekday keys are matched case and whitespace insensitively; missing
-      (or None) days are treated as empty.
+    - helper: {"monday": [{"from", "to", "data": {"temperature": T}}], ...}
+      every day must be fully covered by touching blocks (a missing or None
+      day is reported as not covered).
     - scale: device temperature scale (10 for mts1xx/2xx, 100 for mts9xx).
     - min_temp/max_temp/temp_step: device setpoint limits (in degrees).
     - unit_time: device schedule granularity in minutes (must divide 1440).
@@ -225,10 +208,6 @@ def compile_schedule(
     - entry_count_max: max number of entries per day (0 = unlimited).
     - entry_count_min: days with fewer entries are padded with zero-duration
       entries carrying the first entry temperature (same as the calendar entity).
-    - gap_temperature: when None (strict mode) any uncovered time raises
-      "day_gap"/"day_empty"; otherwise gaps are filled with this temperature.
-    - block_temperature_default: used for blocks without temperature_key data;
-      when None such blocks raise "block_missing_temperature".
 
     Raises ValueError for inconsistent limits (programming errors) and
     ScheduleValidationError for invalid helper data. The device is never
@@ -243,6 +222,10 @@ def compile_schedule(
     if min_temp > max_temp:
         raise ValueError("min_temp cannot exceed max_temp")
 
+    for key in helper:
+        if key not in HA_SCHEDULE_WEEKDAY:
+            raise ScheduleValidationError("unknown_weekday", f"Unknown weekday '{key}'")
+
     warnings: list[str] = []
     temp_kwargs = {
         "scale": scale,
@@ -250,37 +233,13 @@ def compile_schedule(
         "max_temp": max_temp,
         "temp_step": temp_step,
     }
-    gap_scaled = default_scaled = None
-    if gap_temperature is not None:
-        gap_scaled, warning = normalize_temperature(gap_temperature, **temp_kwargs)
-        if warning:
-            warnings.append(f"gap {warning}")
-    if block_temperature_default is not None:
-        default_scaled, warning = normalize_temperature(
-            block_temperature_default, **temp_kwargs
-        )
-        if warning:
-            warnings.append(f"default {warning}")
-
-    days: dict[str, Any] = {}
-    for key, value in helper.items():
-        ha_day = str(key).strip().lower()
-        if ha_day not in HA_SCHEDULE_WEEKDAY:
-            raise ScheduleValidationError(
-                "unknown_weekday", f"Unknown weekday '{key}'", weekday=str(key)
-            )
-        days[ha_day] = value
-
     native = {
         mts_day: _compile_day(
             ha_day,
-            days.get(ha_day) or (),
+            helper.get(ha_day) or (),
             unit_time=unit_time,
             entry_count_max=entry_count_max,
             entry_count_min=entry_count_min,
-            gap_scaled=gap_scaled,
-            default_scaled=default_scaled,
-            temperature_key=temperature_key,
             temp_kwargs=temp_kwargs,
             warnings=warnings,
         )
@@ -291,25 +250,15 @@ def compile_schedule(
 
 def _compile_day(
     day: str,
-    blocks: Iterable[Any],
+    blocks: "Iterable[Any]",
     *,
     unit_time: int,
     entry_count_max: int,
     entry_count_min: int,
-    gap_scaled: int | None,
-    default_scaled: int | None,
-    temperature_key: str,
-    temp_kwargs: dict[str, Any],
+    temp_kwargs: "dict[str, Any]",
     warnings: list[str],
-) -> NativeDayType:
+) -> "NativeDayType":
     """Compile the blocks of a single (HA named) weekday into native entries."""
-    if isinstance(blocks, (str, bytes, Mapping)):
-        blocks = (blocks,)  # reported as an invalid block below
-    try:
-        blocks = list(blocks)
-    except TypeError:
-        blocks = [blocks]  # reported as an invalid block below
-
     # 1. parse and validate each block (raw, un-rounded minutes)
     parsed: list[tuple[float, float, int]] = []
     for index, block in enumerate(blocks):
@@ -321,17 +270,21 @@ def _compile_day(
             raise ScheduleValidationError(
                 "block_invalid",
                 f"{day}: block #{index} must contain '{KEY_FROM}' and '{KEY_TO}'",
-                weekday=day,
-                index=str(index),
+            )
+        data = block.get(KEY_DATA)
+        temperature = data.get(KEY_TEMPERATURE) if isinstance(data, Mapping) else None
+        if temperature is None:
+            raise ScheduleValidationError(
+                "block_missing_temperature",
+                f"{day}: block #{index} has no '{KEY_TEMPERATURE}'",
             )
         try:
             begin = normalize_time(block[KEY_FROM])
             end = normalize_time(block[KEY_TO])
+            scaled, warning = normalize_temperature(temperature, **temp_kwargs)
         except ScheduleValidationError as e:
             raise ScheduleValidationError(
-                e.code,
-                f"{day}: block #{index}: {e}",
-                **{**e.placeholders, "weekday": day, "index": str(index)},
+                e.code, f"{day}: block #{index}: {e}"
             ) from None
         rng = _fmt_range(begin, end)
         if begin >= end:
@@ -339,32 +292,9 @@ def _compile_day(
                 "block_invalid_range",
                 f"{day}: block {rng} must end after it starts "
                 "(blocks cannot cross midnight)",
-                weekday=day,
-                range=rng,
             )
-        data = block.get(KEY_DATA)
-        temperature = data.get(temperature_key) if isinstance(data, Mapping) else None
-        if temperature is None:
-            if default_scaled is None:
-                raise ScheduleValidationError(
-                    "block_missing_temperature",
-                    f"{day}: block {rng} has no '{temperature_key}'",
-                    weekday=day,
-                    range=rng,
-                    key=temperature_key,
-                )
-            scaled = default_scaled
-        else:
-            try:
-                scaled, warning = normalize_temperature(temperature, **temp_kwargs)
-            except ScheduleValidationError as e:
-                raise ScheduleValidationError(
-                    e.code,
-                    f"{day}: block {rng}: {e}",
-                    **{**e.placeholders, "weekday": day, "range": rng},
-                ) from None
-            if warning:
-                warnings.append(f"{day}: block {rng}: {warning}")
+        if warning:
+            warnings.append(f"{day}: block {rng}: {warning}")
         parsed.append((begin, end, scaled))
 
     # 2. sort by start and reject raw overlaps
@@ -372,85 +302,46 @@ def _compile_day(
     parsed.sort(key=lambda b: (b[0], b[1]))
     for prev, cur in zip(parsed, parsed[1:]):
         if cur[0] < prev[1]:
-            range_a = _fmt_range(prev[0], prev[1])
-            range_b = _fmt_range(cur[0], cur[1])
             raise ScheduleValidationError(
                 "block_overlap",
-                f"{day}: blocks {range_a} and {range_b} overlap",
-                weekday=day,
-                range_a=range_a,
-                range_b=range_b,
+                f"{day}: blocks {_fmt_range(prev[0], prev[1])} and "
+                f"{_fmt_range(cur[0], cur[1])} overlap",
             )
 
-    # 3. align boundaries to unit_time (nearest, half-up) and drop collapsed blocks
-    segments: list[tuple[int, int, int]] = []
+    # 3. align boundaries to unit_time, reject gaps and build entries
+    # merging equal consecutive temperatures
+    entries: NativeDayType = []
+    cursor = 0
     for begin, end, scaled in parsed:
         r_begin = _round_to_unit(begin, unit_time)
         r_end = _round_to_unit(end, unit_time)
-        if r_begin != begin or r_end != end:
-            warnings.append(
-                f"{day}: block {_fmt_range(begin, end)} aligned to "
-                f"{_fmt_range(r_begin, r_end)} ({unit_time} minutes granularity)"
-            )
-        if r_begin >= r_end:
+        if r_begin == r_end:
             warnings.append(
                 f"{day}: block {_fmt_range(begin, end)} shorter than "
                 f"{unit_time} minutes dropped"
             )
             continue
-        segments.append((r_begin, r_end, scaled))
-
-    # 4. walk the day: fill or reject gaps, build entries merging equal temperatures
-    entries: NativeDayType = []
-
-    def _append(duration: int, temperature: int):
-        if entries and entries[-1][1] == temperature:
-            entries[-1][0] += duration
+        if r_begin != begin or r_end != end:
+            warnings.append(
+                f"{day}: block {_fmt_range(begin, end)} aligned to "
+                f"{_fmt_range(r_begin, r_end)} ({unit_time} minutes granularity)"
+            )
+        if r_begin != cursor:
+            raise _day_gap(day, cursor, r_begin)
+        if entries and entries[-1][1] == scaled:
+            entries[-1][0] += r_end - r_begin
         else:
-            entries.append([duration, temperature])
-
-    def _gap(begin: int, end: int):
-        if gap_scaled is None:
-            if not blocks:
-                raise ScheduleValidationError(
-                    "day_empty", f"{day}: no schedule blocks defined", weekday=day
-                )
-            rng = _fmt_range(begin, end)
-            raise ScheduleValidationError(
-                "day_gap",
-                f"{day}: {rng} is not covered by any block",
-                weekday=day,
-                range=rng,
-            )
-        _append(end - begin, gap_scaled)
-
-    cursor = 0
-    for r_begin, r_end, scaled in segments:
-        if r_begin < cursor:  # defensive: cannot happen after step 2
-            raise ScheduleValidationError(
-                "block_overlap",
-                f"{day}: overlapping blocks after alignment",
-                weekday=day,
-                range_a=_fmt(cursor),
-                range_b=_fmt(r_begin),
-            )
-        if r_begin > cursor:
-            _gap(cursor, r_begin)
-        _append(r_end - r_begin, scaled)
+            entries.append([r_end - r_begin, scaled])
         cursor = r_end
-    if cursor < MINUTES_PER_DAY:
-        _gap(cursor, MINUTES_PER_DAY)
-    assert sum(entry[0] for entry in entries) == MINUTES_PER_DAY
+    if cursor != MINUTES_PER_DAY:
+        raise _day_gap(day, cursor, MINUTES_PER_DAY)
 
-    # 5. device entry count constraints
+    # 4. device entry count constraints
     if entry_count_max and len(entries) > entry_count_max:
         raise ScheduleValidationError(
             "too_many_entries",
             f"{day}: {len(entries)} schedule entries exceed "
             f"the device limit of {entry_count_max}",
-            weekday=day,
-            count=str(len(entries)),
-            max=str(entry_count_max),
         )
     # same padding convention as calendar.MtsSchedule._async_request_schedule
     # (fresh lists so that entries are never aliased)
@@ -459,29 +350,22 @@ def _compile_day(
     return entries
 
 
-def _minutes_to_output(minutes: int, time_format: str) -> str | time:
-    if time_format == "time":
-        if minutes >= MINUTES_PER_DAY:
-            return time.max
-        return time(minutes // 60, minutes % 60)
-    return _fmt(minutes)
+def _day_gap(day: str, begin: int, end: int) -> ScheduleValidationError:
+    return ScheduleValidationError(
+        "day_gap", f"{day}: {_fmt_range(begin, end)} is not covered by any block"
+    )
 
 
 def decompile_schedule(
-    native: NativeMappingType,
-    *,
-    scale: int,
-    temperature_key: str = DEFAULT_TEMPERATURE_KEY,
-    time_format: Literal["str", "time"] = "str",
-) -> dict[str, list[dict[str, Any]]]:
+    native: "NativeMappingType", *, scale: int
+) -> "dict[str, list[dict[str, Any]]]":
     """
     Convert a native device payload into the HA schedule helper representation.
 
     Only weekdays present in native are emitted (keyed by HA weekday name);
     any other key (channel, section, id, ...) is ignored. Zero-duration entries
     are skipped and consecutive entries with the same temperature are merged.
-    Times are emitted as "HH:MM" strings ("24:00" for end of day) or, with
-    time_format="time", as datetime.time objects (time.max for end of day).
+    Times are emitted as "HH:MM" strings ("24:00" for end of day).
 
     Raises ScheduleValidationError("unsupported_entry_width") for entries not
     shaped like [minutes, temperature] (e.g. mts300 3-value entries) and
@@ -494,9 +378,7 @@ def decompile_schedule(
         day_entries = native[mts_day]
         if not isinstance(day_entries, (list, tuple)):
             raise ScheduleValidationError(
-                "native_invalid",
-                f"{mts_day}: entries must be a list",
-                weekday=mts_day,
+                "native_invalid", f"{mts_day}: entries must be a list"
             )
         segments: list[list[int]] = []  # [begin, end, scaled]
         cursor = 0
@@ -509,23 +391,17 @@ def decompile_schedule(
                 raise ScheduleValidationError(
                     "native_invalid",
                     f"{mts_day}: entry #{index} is not [minutes, temperature]",
-                    weekday=mts_day,
-                    index=str(index),
                 ) from None
             if width != 2:
                 raise ScheduleValidationError(
                     "unsupported_entry_width",
                     f"{mts_day}: entry #{index} has {width} values "
                     "(only [minutes, temperature] is supported)",
-                    weekday=mts_day,
-                    width=str(width),
                 )
             if duration < 0 or cursor + duration > MINUTES_PER_DAY:
                 raise ScheduleValidationError(
                     "native_invalid",
                     f"{mts_day}: entry #{index} has an invalid duration {duration}",
-                    weekday=mts_day,
-                    index=str(index),
                 )
             if duration == 0:
                 continue
@@ -535,29 +411,27 @@ def decompile_schedule(
             else:
                 segments.append([cursor, end, scaled])
             cursor = end
-        if segments and cursor != MINUTES_PER_DAY:
+        if day_entries and cursor != MINUTES_PER_DAY:
             raise ScheduleValidationError(
                 "native_invalid",
                 f"{mts_day}: entries cover {cursor} minutes "
                 f"instead of {MINUTES_PER_DAY}",
-                weekday=mts_day,
             )
         result[ha_day] = [
             {
-                KEY_FROM: _minutes_to_output(begin, time_format),
-                KEY_TO: _minutes_to_output(end, time_format),
-                KEY_DATA: {temperature_key: scaled / scale},
+                KEY_FROM: _fmt(begin),
+                KEY_TO: _fmt(end),
+                KEY_DATA: {KEY_TEMPERATURE: scaled / scale},
             }
             for begin, end, scaled in segments
         ]
     return result
 
 
-def normalize_native_day(entries: Iterable[Sequence[int]]) -> NativeDayType:
+def normalize_native_day(entries: "Iterable[Sequence[int]]") -> "NativeDayType":
     """
     Return a canonical copy of a native day: zero (or negative) duration entries
     are dropped and consecutive entries with equal payload (entry[1:]) are merged.
-    Width agnostic (works on [minutes, heat, cold] entries too).
     """
     result: NativeDayType = []
     for entry in entries:
@@ -571,7 +445,7 @@ def normalize_native_day(entries: Iterable[Sequence[int]]) -> NativeDayType:
     return result
 
 
-def native_equal(a: NativeMappingType, b: NativeMappingType) -> bool:
+def native_equal(a: "NativeMappingType", b: "NativeMappingType") -> bool:
     """
     Compare two native payloads on the 7 mts weekdays only (other keys like
     channel/section/id are ignored), after normalize_native_day (so padding and

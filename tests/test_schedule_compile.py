@@ -104,8 +104,6 @@ def raises_code(code: str, func, *args, **kwargs) -> ScheduleValidationError:
         func(*args, **kwargs)
     error = excinfo.value
     assert error.code == code, str(error)
-    for value in error.placeholders.values():
-        assert isinstance(value, str)
     return error
 
 
@@ -139,7 +137,7 @@ def test_normalize_time(value, expected):
 )
 def test_normalize_time_invalid(value):
     error = raises_code("time_invalid", normalize_time, value)
-    assert error.placeholders == {"value": repr(value)}
+    assert repr(value) in str(error)
 
 
 # --------------------------------------------------------------------------
@@ -158,6 +156,11 @@ def test_normalize_time_invalid(value):
         (21.5, dict(MTS100_TEMP, scale=100), 2150, False),
         (1.0, dict(scale=100, min_temp=0.0, max_temp=50.0, temp_step=0.5), 100, False),
         (21.3, dict(MTS100_TEMP, temp_step=0), 213, False),
+        # result compared against the unscaled input
+        (21.04, MTS100_TEMP, 210, True),
+        (21.04, dict(MTS100_TEMP, temp_step=0), 210, True),
+        # single rounding (no double rounding through the scaled int)
+        (21.246, dict(MTS100_TEMP, scale=100), 2100, True),
     ],
 )
 def test_normalize_temperature(value, kwargs, expected, warns):
@@ -170,6 +173,8 @@ def test_normalize_temperature(value, kwargs, expected, warns):
 def test_normalize_temperature_warning_text():
     _, warning = normalize_temperature(40, **MTS100_TEMP)
     assert warning == "temperature 40 adjusted to 35"
+    _, warning = normalize_temperature(21.04, **MTS100_TEMP)
+    assert warning == "temperature 21.04 adjusted to 21"
 
 
 @pytest.mark.parametrize("value", [True, False, "warm", math.nan, math.inf, None])
@@ -177,7 +182,7 @@ def test_normalize_temperature_invalid(value):
     error = raises_code(
         "temperature_invalid", normalize_temperature, value, **MTS100_TEMP
     )
-    assert error.placeholders == {"value": repr(value)}
+    assert repr(value) in str(error)
 
 
 # --------------------------------------------------------------------------
@@ -233,38 +238,6 @@ def test_compile_time_objects():
     assert result.native["mon"] == FULL_DAY_MTS100
 
 
-def test_compile_setback_fills_gaps():
-    blocks = [B("06:30", "08:00", 21), B("17:00", "22:00", 21)]
-    result = compile_schedule(week(blocks), gap_temperature=15, **MTS100)
-    assert result.warnings == []
-    assert result.native["mon"] == [
-        [390, 150],
-        [90, 210],
-        [540, 150],
-        [300, 210],
-        [120, 150],
-        [0, 150],
-    ]
-
-
-def test_compile_setback_missing_days():
-    result = compile_schedule({"monday": FULL_DAY}, gap_temperature=15, **MTS100)
-    assert result.native["mon"] == FULL_DAY_MTS100
-    for day in MTS_SCHEDULE_WEEKDAY[1:]:
-        assert result.native[day] == [[1440, 150]] + [[0, 150]] * 5
-
-
-def test_compile_setback_gap_merges_with_equal_neighbour():
-    blocks = [B("00:00", "06:00", 15), B("08:00", "24:00", 21)]
-    result = compile_schedule(week(blocks), gap_temperature=15, **MTS200)
-    assert result.native["mon"] == [[480, 150], [960, 210]]
-
-
-def test_compile_setback_gap_temperature_warning():
-    result = compile_schedule(week(), gap_temperature=2, **MTS100)
-    assert result.warnings == ["gap temperature 2 adjusted to 5"]
-
-
 def test_compile_mts960_no_padding():
     result = compile_schedule(week(), **MTS960)
     assert result.warnings == []
@@ -286,34 +259,6 @@ def test_compile_entry_count_max_unlimited():
     assert sum(entry[0] for entry in result.native["mon"]) == 1440
 
 
-def test_compile_block_temperature_default():
-    blocks = [B("00:00", "06:00"), B("06:00", "24:00", 21)]
-    result = compile_schedule(week(blocks), block_temperature_default=17, **MTS200)
-    assert result.native["mon"] == [[360, 170], [1080, 210]]
-    # also for blocks with no data at all
-    blocks = [{"from": "00:00", "to": "06:00"}, B("06:00", "24:00", 21)]
-    result = compile_schedule(week(blocks), block_temperature_default=17, **MTS200)
-    assert result.native["mon"] == [[360, 170], [1080, 210]]
-
-
-def test_compile_custom_temperature_key():
-    blocks = [
-        {"from": "00:00", "to": "12:00", "data": {"setpoint": 18}},
-        {"from": "12:00", "to": "24:00", "data": {"setpoint": 21}},
-    ]
-    result = compile_schedule(week(blocks), temperature_key="setpoint", **MTS200)
-    assert result.native["sun"] == [[720, 180], [720, 210]]
-
-
-def test_compile_weekday_keys_case_insensitive():
-    helper = {
-        (day.upper() if i % 2 else f" {day.title()} "): FULL_DAY
-        for i, day in enumerate(HA_SCHEDULE_WEEKDAY)
-    }
-    result = compile_schedule(helper, **MTS100)
-    assert all(result.native[day] == FULL_DAY_MTS100 for day in MTS_SCHEDULE_WEEKDAY)
-
-
 def test_compile_json_serializable():
     result = compile_schedule(week(), **MTS100)
     assert json.loads(json.dumps(result.native)) == result.native
@@ -321,7 +266,7 @@ def test_compile_json_serializable():
 
 def test_compile_temperature_warnings():
     blocks = [B("00:00", "12:00", 21.3), B("12:00", "24:00", 40)]
-    result = compile_schedule({"monday": blocks}, gap_temperature=15, **MTS200)
+    result = compile_schedule(week(monday=blocks), **MTS200)
     assert result.native["mon"] == [[720, 215], [720, 350]]
     assert result.warnings == [
         "monday: block 00:00-12:00: temperature 21.3 adjusted to 21.5",
@@ -371,9 +316,11 @@ def test_compile_rounding_drops_short_block():
     ]
     result = compile_schedule(week(blocks), **MTS100)
     assert result.native["mon"] == [[1440, 150]] + [[0, 150]] * 5
-    assert (
-        "monday: block 06:00-06:05 shorter than 15 minutes dropped" in result.warnings
-    )
+    # only the "dropped" warning (no "aligned" one) for the dropped block
+    assert [w for w in result.warnings if w.startswith("monday:")] == [
+        "monday: block 06:00-06:05 shorter than 15 minutes dropped",
+        "monday: block 06:05-24:00 aligned to 06:00-24:00 (15 minutes granularity)",
+    ]
 
 
 def test_compile_rounding_keeps_block_over_half_unit():
@@ -397,7 +344,7 @@ def test_compile_unit_time_1_strict_gap():
     error = raises_code(
         "day_gap", compile_schedule, week(blocks), **dict(MTS200, unit_time=1)
     )
-    assert error.placeholders == {"weekday": "monday", "range": "23:59-24:00"}
+    assert str(error) == "monday: 23:59-24:00 is not covered by any block"
 
 
 @pytest.mark.parametrize("unit_time", [7, 0, -15])
@@ -412,14 +359,13 @@ def test_compile_bad_unit_time(unit_time):
 def test_error_day_gap():
     helper = week(tuesday=[B("06:30", "24:00", 15)])
     error = raises_code("day_gap", compile_schedule, helper, **MTS100)
-    assert error.placeholders == {"weekday": "tuesday", "range": "00:00-06:30"}
     assert str(error) == "tuesday: 00:00-06:30 is not covered by any block"
 
 
 def test_error_day_gap_after_rounding():
     helper = week(monday=[B("00:00", "08:00", 15), B("08:10", "24:00", 21)])
     error = raises_code("day_gap", compile_schedule, helper, **MTS100)
-    assert error.placeholders == {"weekday": "monday", "range": "08:00-08:15"}
+    assert str(error) == "monday: 08:00-08:15 is not covered by any block"
 
 
 @pytest.mark.parametrize("empty", ["missing", None, []])
@@ -429,18 +375,14 @@ def test_error_day_empty(empty):
         del helper["wednesday"]
     else:
         helper["wednesday"] = empty
-    error = raises_code("day_empty", compile_schedule, helper, **MTS100)
-    assert error.placeholders == {"weekday": "wednesday"}
+    error = raises_code("day_gap", compile_schedule, helper, **MTS100)
+    assert str(error) == "wednesday: 00:00-24:00 is not covered by any block"
 
 
 def test_error_block_overlap():
     helper = week(monday=[B("06:30", "24:00", 21), B("00:00", "07:00", 15)])
     error = raises_code("block_overlap", compile_schedule, helper, **MTS100)
-    assert error.placeholders == {
-        "weekday": "monday",
-        "range_a": "00:00-07:00",
-        "range_b": "06:30-24:00",
-    }
+    assert str(error) == "monday: blocks 00:00-07:00 and 06:30-24:00 overlap"
 
 
 @pytest.mark.parametrize(
@@ -450,7 +392,7 @@ def test_error_block_overlap():
 def test_error_block_invalid_range(begin, end, rng):
     helper = week(monday=[B(begin, end, 15)])
     error = raises_code("block_invalid_range", compile_schedule, helper, **MTS100)
-    assert error.placeholders == {"weekday": "monday", "range": rng}
+    assert str(error).startswith(f"monday: block {rng} ")
 
 
 @pytest.mark.parametrize(
@@ -466,25 +408,13 @@ def test_error_block_invalid_range(begin, end, rng):
 def test_error_block_invalid(block):
     helper = week(friday=[B("00:00", "06:00", 15), block])
     error = raises_code("block_invalid", compile_schedule, helper, **MTS100)
-    assert error.placeholders == {"weekday": "friday", "index": "1"}
-
-
-@pytest.mark.parametrize("day_value", ["00:00-24:00", 42, {"from": "00:00"}])
-def test_error_day_not_a_list(day_value):
-    helper = week(friday=day_value)
-    error = raises_code("block_invalid", compile_schedule, helper, **MTS100)
-    assert error.placeholders["weekday"] == "friday"
+    assert str(error).startswith("friday: block #1 ")
 
 
 def test_error_time_invalid_in_block():
     helper = week(monday=[B("00:00", "25:00", 15)])
     error = raises_code("time_invalid", compile_schedule, helper, **MTS100)
-    assert error.placeholders == {
-        "weekday": "monday",
-        "index": "0",
-        "value": repr("25:00"),
-    }
-    assert str(error).startswith("monday: block #0: ")
+    assert str(error) == "monday: block #0: Invalid time value: '25:00'"
 
 
 @pytest.mark.parametrize(
@@ -494,22 +424,13 @@ def test_error_time_invalid_in_block():
 def test_error_block_missing_temperature(block):
     helper = week(monday=[block])
     error = raises_code("block_missing_temperature", compile_schedule, helper, **MTS100)
-    assert error.placeholders == {
-        "weekday": "monday",
-        "range": "00:00-24:00",
-        "key": "temperature",
-    }
+    assert str(error) == "monday: block #0 has no 'temperature'"
 
 
 def test_error_temperature_invalid_in_block():
     helper = week(monday=[B("00:00", "24:00", "warm")])
     error = raises_code("temperature_invalid", compile_schedule, helper, **MTS100)
-    assert error.placeholders == {
-        "weekday": "monday",
-        "range": "00:00-24:00",
-        "value": repr("warm"),
-    }
-    assert str(error).startswith("monday: block 00:00-24:00: ")
+    assert str(error) == "monday: block #0: Invalid temperature: 'warm'"
 
 
 def test_error_too_many_entries():
@@ -518,29 +439,15 @@ def test_error_too_many_entries():
     ]
     helper = week(monday=blocks)
     error = raises_code("too_many_entries", compile_schedule, helper, **MTS100)
-    assert error.placeholders == {"weekday": "monday", "count": "7", "max": "6"}
-
-
-def test_error_too_many_entries_after_gap_fill():
-    blocks = [
-        B("06:00", "08:00", 21),
-        B("12:00", "14:00", 21),
-        B("18:00", "22:00", 21),
-    ]
-    error = raises_code(
-        "too_many_entries",
-        compile_schedule,
-        week(blocks),
-        gap_temperature=15,
-        **MTS100,
-    )
-    assert error.placeholders == {"weekday": "monday", "count": "7", "max": "6"}
+    assert str(error) == "monday: 7 schedule entries exceed the device limit of 6"
 
 
 def test_error_unknown_weekday():
     helper = {"mon": FULL_DAY}
     error = raises_code("unknown_weekday", compile_schedule, helper, **MTS100)
-    assert error.placeholders == {"weekday": "mon"}
+    assert "'mon'" in str(error)
+    # weekday keys are exact (lowercase) names
+    raises_code("unknown_weekday", compile_schedule, week(Monday=FULL_DAY), **MTS100)
 
 
 def test_error_bad_limits():
@@ -605,30 +512,12 @@ def test_decompile_skips_zero_duration():
     }
 
 
-def test_decompile_time_format():
-    helper = decompile_schedule(MTS100_TRACE, scale=10, time_format="time")
-    monday = helper["monday"]
-    assert [(b["from"], b["to"]) for b in monday] == [
-        (time(0, 0), time(6, 30)),
-        (time(6, 30), time(13, 0)),
-        (time(13, 0), time(21, 30)),
-        (time(21, 30), time.max),
-    ]
-
-
 def test_decompile_partial_week():
     native = {"mon": [[1440, 150]], "tue": []}
     assert decompile_schedule(native, scale=10) == {
         "monday": [{"from": "00:00", "to": "24:00", "data": {"temperature": 15.0}}],
         "tuesday": [],
     }
-
-
-def test_decompile_custom_temperature_key():
-    helper = decompile_schedule(
-        {"mon": [[1440, 150]]}, scale=10, temperature_key="setpoint"
-    )
-    assert helper["monday"][0]["data"] == {"setpoint": 15.0}
 
 
 @pytest.mark.parametrize(
@@ -638,6 +527,7 @@ def test_decompile_custom_temperature_key():
         ([[-10, 150], [1450, 210]], "native_invalid"),
         ([[720, 150], [730, 210]], "native_invalid"),
         ([[1440, 150, 200]], "unsupported_entry_width"),
+        ([[0, 150], [0, 150]], "native_invalid"),
         ([[1440]], "native_invalid"),
         ([None], "native_invalid"),
         ([["a", 150]], "native_invalid"),
@@ -646,7 +536,7 @@ def test_decompile_custom_temperature_key():
 )
 def test_decompile_invalid(day, code):
     error = raises_code(code, decompile_schedule, {"mon": day}, scale=10)
-    assert error.placeholders["weekday"] == "mon"
+    assert str(error).startswith("mon: ")
 
 
 def test_decompile_json_serializable():
@@ -678,19 +568,6 @@ def test_roundtrip_mts960_trace():
     result = compile_schedule(decompile_schedule(MTS960_TRACE, scale=100), **MTS960)
     assert result.warnings == []
     assert result.native == {d: MTS960_TRACE[d] for d in MTS_SCHEDULE_WEEKDAY}
-
-
-@pytest.mark.parametrize(
-    "trace, kwargs", [(MTS100_TRACE, MTS100), (MTS960_TRACE, MTS960)]
-)
-def test_roundtrip_time_objects(trace, kwargs):
-    scale = kwargs["scale"]
-    assert (
-        compile_schedule(
-            decompile_schedule(trace, scale=scale, time_format="time"), **kwargs
-        ).native
-        == compile_schedule(decompile_schedule(trace, scale=scale), **kwargs).native
-    )
 
 
 @pytest.mark.parametrize("kwargs", [MTS100, MTS200, MTS960])

@@ -375,3 +375,52 @@ async def test_schedule_sync_write_error(request, hass: "HomeAssistant"):
         assert len(ctx.set_payloads) == 1
         await ctx.async_tick(select.REFRESH_DELAY)
         assert ctx.sensor_state.state == ScheduleSyncSensor.STATE_SYNCED
+
+
+async def test_schedule_sync_options(request, hass: "HomeAssistant"):
+    """The select options follow the schedule helpers added/removed at runtime."""
+    async with _async_setup(request, hass) as ctx:
+        select = ctx.select
+        await select.async_select_option(HELPER_ENTITY_ID)
+        await ctx.async_tick(select.SYNC_DELAY)
+        await ctx.async_tick(select.REFRESH_DELAY)
+        assert ctx.sensor_state.state == ScheduleSyncSensor.STATE_SYNCED
+        assert select.options == [hac.STATE_OFF, HELPER_ENTITY_ID]
+
+        other_entity_id = "schedule.other"
+        hass.states.async_set(other_entity_id, hac.STATE_OFF, {})
+        await hass.async_block_till_done()
+        assert select.options == [hac.STATE_OFF, HELPER_ENTITY_ID, other_entity_id]
+        select_state = hass.states.get(select.entity_id)  # type: ignore
+        assert select_state
+        assert select_state.attributes["options"] == select.options
+        assert select_state.state == HELPER_ENTITY_ID
+
+        hass.states.async_remove(other_entity_id)
+        await hass.async_block_till_done()
+        assert select.options == [hac.STATE_OFF, HELPER_ENTITY_ID]
+        await ctx.async_tick(select.SYNC_DELAY)
+        assert select.linked_helper == HELPER_ENTITY_ID
+        assert ctx.sensor_state.state == ScheduleSyncSensor.STATE_SYNCED
+        assert len(ctx.set_payloads) == 1
+
+        # the linked helper is removed: it stays selected (and listed) while
+        # the status reports the error
+        helper_state = hass.states.get(HELPER_ENTITY_ID)
+        assert helper_state
+        hass.states.async_remove(HELPER_ENTITY_ID)
+        await hass.async_block_till_done()
+        assert select.linked_helper == HELPER_ENTITY_ID
+        assert select.options == [hac.STATE_OFF, HELPER_ENTITY_ID]
+        assert hass.states.get(select.entity_id).state == HELPER_ENTITY_ID  # type: ignore
+        assert ctx.sensor_state.state == ScheduleSyncSensor.STATE_ERROR
+
+        # ...and it comes back: the existing subscriptions resync
+        hass.states.async_set(
+            HELPER_ENTITY_ID, helper_state.state, helper_state.attributes
+        )
+        await hass.async_block_till_done()
+        assert select.options == [hac.STATE_OFF, HELPER_ENTITY_ID]
+        await ctx.async_tick(select.SYNC_DELAY)
+        assert ctx.sensor_state.state == ScheduleSyncSensor.STATE_SYNCED
+        assert len(ctx.set_payloads) == 1

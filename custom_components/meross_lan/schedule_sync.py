@@ -16,7 +16,9 @@ from typing import TYPE_CHECKING, override
 from homeassistant.core import CoreState, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import (
+    async_track_state_added_domain,
     async_track_state_change_event,
+    async_track_state_removed_domain,
     async_track_state_report_event,
 )
 from homeassistant.util import dt as dt_util
@@ -177,6 +179,10 @@ class ScheduleHelperSelect(SelectEntity.RestoreEntity, SelectEntity):
         _sync_lock: asyncio.Lock
         """Serializes sync runs (timers, service calls)."""
         _unsub_started: Callable[[], None] | None
+        _unsub_added: Callable[[], None] | None
+        """Tracks schedule helpers added to HA (options refresh)."""
+        _unsub_removed: Callable[[], None] | None
+        """Tracks schedule helpers removed from HA (options refresh)."""
         _unsub_state: Callable[[], None] | None
         _unsub_report: Callable[[], None] | None
         _last_payload: dict[str, Any] | None
@@ -207,6 +213,8 @@ class ScheduleHelperSelect(SelectEntity.RestoreEntity, SelectEntity):
     _INIT__refresh_pending = False
     _AUTO_INIT = (
         "_unsub_started",
+        "_unsub_added",
+        "_unsub_removed",
         "_unsub_state",
         "_unsub_report",
         "_last_payload",
@@ -232,6 +240,7 @@ class ScheduleHelperSelect(SelectEntity.RestoreEntity, SelectEntity):
     @override
     async def async_shutdown(self):
         self._cancel_started_listener()
+        self._options_tracking_stop()
         self._sync_stop()
         await super().async_shutdown()
         del self.climate
@@ -262,6 +271,7 @@ class ScheduleHelperSelect(SelectEntity.RestoreEntity, SelectEntity):
 
     async def async_will_remove_from_hass(self):
         self._cancel_started_listener()
+        self._options_tracking_stop()
         self._sync_stop()
         await super().async_will_remove_from_hass()
 
@@ -285,13 +295,24 @@ class ScheduleHelperSelect(SelectEntity.RestoreEntity, SelectEntity):
             return None
         return option
 
-    @callback
-    def _setup_options(self, *_):
-        self._unsub_started = None  # one-shot listener (if any) already fired
-        self.options = [
+    def _build_options(self):
+        return [
             hac.STATE_OFF,
             *sorted(self.hass.states.async_entity_ids(SCHEDULE_DOMAIN)),
         ]
+
+    @callback
+    def _setup_options(self, *_):
+        self._unsub_started = None  # one-shot listener (if any) already fired
+        # keep the options updated when schedule helpers are added/removed
+        self._options_tracking_stop()
+        self._unsub_added = async_track_state_added_domain(
+            self.hass, SCHEDULE_DOMAIN, self._on_helpers_changed
+        )
+        self._unsub_removed = async_track_state_removed_domain(
+            self.hass, SCHEDULE_DOMAIN, self._on_helpers_changed
+        )
+        self.options = self._build_options()
         if self.current_option not in self.options:
             # this might happen when restoring a not anymore valid entity
             if self.linked_helper:
@@ -304,6 +325,27 @@ class ScheduleHelperSelect(SelectEntity.RestoreEntity, SelectEntity):
 
         self.flush_state()
         self._sync_start()
+
+    @callback
+    def _on_helpers_changed(self, event: "Event[Any]", /):
+        """A schedule helper was added to/removed from HA: refresh the options.
+        This doesn't touch the link/sync: when the linked helper is removed it stays
+        selected (and listed) so that the user sees what is missing (the sync status
+        reports the error) and the sync recovers if it comes back."""
+        options = self._build_options()
+        if (linked_helper := self.linked_helper) and (linked_helper not in options):
+            options.append(linked_helper)
+        if options != self.options:
+            self.options = options
+            self.flush_state()
+
+    def _options_tracking_stop(self):
+        if self._unsub_added:
+            self._unsub_added()
+            self._unsub_added = None
+        if self._unsub_removed:
+            self._unsub_removed()
+            self._unsub_removed = None
 
     def _cancel_started_listener(self):
         if self._unsub_started:

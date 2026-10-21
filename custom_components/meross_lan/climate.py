@@ -10,6 +10,7 @@ from .const import hac
 from .helpers import reverse_lookup
 from .helpers.entity import ParserEntity
 from .number import NumberParser
+from .schedule_sync import ScheduleHelperSelect, ScheduleSyncSensor
 from .select import SelectEntity
 from .sensor import SensorParser
 
@@ -300,6 +301,11 @@ class MtsClimate(ParserEntity, climate.ClimateEntity):
                     climate.temperature_unit,
                 )
 
+    ScheduleHelperSelect = ScheduleHelperSelect
+    """Links a HA schedule helper to the device schedule. Overridable in derived."""
+    ScheduleSyncSensor = ScheduleSyncSensor
+    """Diagnostic status of the schedule helper sync. Overridable in derived."""
+
     if TYPE_CHECKING:
         ns_value: mt.JsonMapping
         ATTR_HVAC_MODE: Final
@@ -309,6 +315,8 @@ class MtsClimate(ParserEntity, climate.ClimateEntity):
 
         SCHEDULE_NS: ClassVar[mn.Namespace]
         Schedule: ClassVar[type[MtsSchedule]]
+        SCHEDULE_SYNC_SUPPORTED: ClassVar[bool]
+        """Enables the schedule helper sync entities (and services)."""
         TARGET_TEMPERATURE_STEP: ClassVar[float]
         MTS_MODE_TO_PRESET_MAP: ClassVar[dict[int | None, str]]
         """Maps device 'mode' value to the HA climate.preset_mode"""
@@ -328,7 +336,9 @@ class MtsClimate(ParserEntity, climate.ClimateEntity):
         number_preset_temperature: Final[tuple[SetPointNumber, ...]]
         schedule: Final[MtsSchedule]
         select_track_sensor: Final[TrackSensorSelect]
+        select_schedule_helper: Final[ScheduleHelperSelect | None]
         sensor_current_temperature: Final[SensorParser]
+        sensor_schedule_sync: Final[ScheduleSyncSensor | None]
         _mts_active: bool | int
         _mts_mode: int
         _mts_onoff: int
@@ -364,6 +374,7 @@ class MtsClimate(ParserEntity, climate.ClimateEntity):
     HVACAction = climate.HVACAction
     HVACMode = climate.HVACMode
 
+    SCHEDULE_SYNC_SUPPORTED = True
     TARGET_TEMPERATURE_STEP = 0.5
     MTS_MODE_TO_TEMPERATUREKEY_MAP = {}
     SETPOINT_ICON_MAP = {
@@ -386,11 +397,17 @@ class MtsClimate(ParserEntity, climate.ClimateEntity):
 
     _attr_translation_key = "mts_climate"
 
+    _AUTO_INIT = (
+        "select_schedule_helper",
+        "sensor_schedule_sync",
+    )
     _AUTO_DESTROY = (
         "number_adjust_temperature",
         "schedule",
+        "select_schedule_helper",
         "select_track_sensor",
         "sensor_current_temperature",
+        "sensor_schedule_sync",
     )
     __slots__ = (
         "current_humidity",
@@ -471,6 +488,10 @@ class MtsClimate(ParserEntity, climate.ClimateEntity):
         self.parent.enable_check_device_time()  # useful for schedule entity times
 
         self.select_track_sensor = cls.TrackSensorSelect(self)
+        if cls.SCHEDULE_SYNC_SUPPORTED:
+            # sensor first: the select references it
+            self.sensor_schedule_sync = cls.ScheduleSyncSensor(self)
+            self.select_schedule_helper = cls.ScheduleHelperSelect(self)
         self.sensor_current_temperature = SensorParser(
             self,
             **(

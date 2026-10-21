@@ -99,6 +99,9 @@ class Mts300Climate(MtsThermostatClimate):
 
     # MtsClimate class attributes
     SCHEDULE_NS = mn_t.Appliance_Control_Thermostat_ScheduleB
+    # schedule helper sync not supported: mts300 schedule entries carry
+    # [minutes, heat, cold] (plus an undocumented 'pre' block)
+    SCHEDULE_SYNC_SUPPORTED = False
     # TODO: customize parsing of native payload since we have 2 temperatures
     MTS_MODE_TO_PRESET_MAP = {
         mc.MTS300_WORK_MANUAL: MtsThermostatClimate.Preset.CUSTOM,

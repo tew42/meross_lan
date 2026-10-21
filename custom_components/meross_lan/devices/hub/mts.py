@@ -278,6 +278,13 @@ class mts100(SubDevice, MtsClimate):
             self._mts_onoff = onoff
             self.flush_state()
 
+    @override
+    def schedule_limits_known(self, /):
+        # the slots per day come with scheduleBMode (Hub.Mts100.All)
+        return super().schedule_limits_known() and bool(
+            self.schedule._schedule_entry_count_max
+        )
+
     def update_scheduleb_mode(self, mode, /):
         self.extra_state_attributes[mc.KEY_SCHEDULEBMODE] = mode
         self.schedule._schedule_entry_count_max = mode

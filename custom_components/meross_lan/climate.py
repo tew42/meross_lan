@@ -5,7 +5,6 @@ from homeassistant.components import climate, sensor
 from homeassistant.core import CoreState, callback
 from homeassistant.util.unit_conversion import TemperatureConverter
 
-from . import schedule_services
 from .calendar import MtsSchedule
 from .const import hac
 from .helpers import reverse_lookup
@@ -548,6 +547,11 @@ class MtsClimate(ParserEntity, climate.ClimateEntity):
     def is_mts_scheduled(self, /):
         raise NotImplementedError()
 
+    def schedule_limits_known(self, /) -> bool:
+        """True when the device schedule (and so its limits) has been received
+        so that a schedule can be compiled for (and written to) the device."""
+        return bool(self.schedule.ns_value)
+
     def _update_current_temperature(self, current_temperature: float | int, /):
         """
         Common handler for incoming room temperature value
@@ -578,8 +582,4 @@ class MtsClimate(ParserEntity, climate.ClimateEntity):
         )
 
 
-async def async_setup_entry(hass, config_entry, async_add_entities):
-    await MtsClimate.platform_setup_entry(hass, config_entry, async_add_entities)
-    schedule_services.async_register(
-        config_entry.runtime_data.platforms[MtsClimate.PLATFORM]
-    )
+async_setup_entry = MtsClimate.platform_setup_entry

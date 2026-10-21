@@ -129,31 +129,31 @@ Thermostats with an on-board weekly schedule (MTS100/MTS150 through the MSH300 h
 3. On the thermostat device page enable the 'Schedule helper' select and the 'Schedule sync' sensor (both are disabled by default).
 4. Pick the helper in the 'Schedule helper' select (the list follows the helpers existing in Home Assistant).
 
-The schedule is written to the device within a couple of seconds and written again whenever the helper is edited. The device only follows it while in schedule mode: climate preset `auto` on MTS100/MTS150/MTS200, `schedule_heating`/`schedule_cooling` on MTS960 (see the sensor `schedule_mode_active` attribute).
+The schedule is written to the device within a couple of seconds and written again whenever the helper is edited. Restarting Home Assistant (or reloading the integration) never writes it: the link is restored and a device schedule changed meanwhile is reported as `drift`. The device only follows it while in schedule mode: climate preset `auto` on MTS100/MTS150/MTS200, `schedule_heating`/`schedule_cooling` on MTS960.
 
 The helper is adapted to the device limits and any adjustment is listed in the sensor `warnings` attribute:
 - block boundaries are rounded to the nearest 15 minutes (the MSH300 hub advertises its own `scheduleUnitTime` for its valves) and blocks collapsing to zero length are dropped
 - the number of slots per day is limited by the device (6 on MTS100/MTS150, 8 on MTS200, 12 on MTS960). Consecutive blocks with the same temperature count as one; a day exceeding the limit is an error
 - temperatures are clamped to the device range and snapped to 0.5 °C steps
 
-Times are wall-clock: HA local time maps 1:1 to the device local time, so ensure the device time zone matches HA (meross_lan raises a repair when it doesn't and the sensor exposes a `timezone_mismatch` attribute).
+Times are wall-clock: HA local time maps 1:1 to the device local time, so ensure the device time zone matches HA (meross_lan raises a repair when it doesn't).
 
 ### Schedule sync sensor
 
 - `off`: no helper linked
-- `pending`: write in progress, waiting for the device confirmation, device offline or device schedule not yet known (retried every minute). See the `reason` attribute
+- `pending`: write in progress, device offline, device schedule not yet known or write not confirmed (retried every minute and as soon as the device reports its schedule). See the `reason` attribute
 - `synced`: the device schedule matches the helper
 - `drift`: the device schedule differs from the helper (e.g. it was changed in the Meross app or through the calendar entity). meross_lan does not overwrite it by itself: call `meross_lan.sync_schedule` (or select 'Off' and then the helper again) to push the helper. An automation triggered on `drift` can enforce this
 - `error`: the helper is unreadable or was removed, it doesn't compile (gap, overlap, missing temperature, too many slots) or the device write failed. `reason` carries the message: fix the helper or call `meross_lan.sync_schedule` to retry
 
-Attributes: `helper`, `reason`, `warnings`, `last_sync` (time of the last confirmed sync), `schedule_mode_active`, `timezone_mismatch`.
+Attributes: `helper`, `reason`, `warnings`, `last_sync` (time of the last confirmed sync).
 
 ### Schedule services
 
 These target meross_lan climate entities:
-- `meross_lan.get_schedule` returns (as action response, keyed by entity id) the device schedule as `schedule` (helper format), `native` (raw device payload), `limits` (time unit, slots per day, temperature range and step), `schedule_mode_active` and `linked_helper`.
+- `meross_lan.get_schedule` returns (as action response, keyed by entity id) the device schedule as `schedule` (helper format), `limits` (time unit, slots per day, temperature range and step) and `linked_helper`.
 - `meross_lan.set_schedule` writes a schedule directly, without a helper. The format is the same as a YAML `schedule:` helper: all seven days are required and `to: "24:00"` ends the day. If a helper is linked and differs, the sensor will report `drift`.
-- `meross_lan.sync_schedule` re-reads the linked helper and writes it now, even when unchanged (this also overwrites a drifted device schedule).
+- `meross_lan.sync_schedule` re-reads the linked helper and writes it now, even when unchanged (this also overwrites a drifted device schedule). It fails if the device is offline: the write is then retried when the device is back.
 
 ```yaml
 action: meross_lan.set_schedule
@@ -175,6 +175,7 @@ To seed a helper from the current device schedule call `meross_lan.get_schedule`
 - One-way only: changes made on the device are flagged as `drift`, never copied back to the helper.
 - The helper on/off state is not used: only its blocks and their `temperature` are.
 - A failed device write is not retried on a timer: the sensor stays `error` until the next sync pass (helper edited or re-linked, `meross_lan.sync_schedule` called, or the helper own state update at its next block boundary).
+- Renaming the helper (its entity id) is seen as a removal: the sensor reports `error` and the link is dropped on the next restart. Select the renamed helper again.
 - MTS300 is not supported.
 
 ## Service

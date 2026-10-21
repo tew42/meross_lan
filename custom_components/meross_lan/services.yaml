@@ -124,7 +124,7 @@ request:
         text:
 get_schedule:
   name: Get schedule
-  description: Returns the weekly schedule stored in the thermostat (in Home Assistant schedule-helper format plus the raw device payload and limits)
+  description: Returns the weekly schedule stored in the thermostat (in Home Assistant schedule-helper format) and its limits
   target:
     entity:
       integration: meross_lan

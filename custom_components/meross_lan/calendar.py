@@ -150,6 +150,15 @@ class MtsSchedule(ParserEntity, calendar.CalendarEntity):
         self._schedule = mn.EMPTY_DICT
         super().set_unavailable()
 
+    @property
+    def limits(self) -> "dict[str, int]":
+        """The device schedule limits (named as the compile_schedule kwargs)."""
+        return {
+            "unit_time": self._schedule_unit_time,
+            "entry_count_max": self._schedule_entry_count_max,
+            "entry_count_min": self._schedule_entry_count_min,
+        }
+
     # interface: Calendar
     @property
     def event(self) -> calendar.CalendarEvent | None:

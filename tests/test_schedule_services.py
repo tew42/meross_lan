@@ -4,33 +4,36 @@ from copy import deepcopy
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
-from homeassistant.exceptions import ServiceValidationError
-from homeassistant.setup import async_setup_component
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 import pytest
 
 try:
     import probatio as vol
-except:
+except ImportError:
     import voluptuous as vol
 
 from custom_components.meross_lan import const as mlc
-from custom_components.meross_lan.climate import MtsClimate
 from custom_components.meross_lan.helpers.schedule import (
-    HA_SCHEDULE_WEEKDAY,
     MTS_SCHEDULE_WEEKDAY,
-    compile_schedule,
     decompile_schedule,
     native_equal,
 )
 from custom_components.meross_lan.merossclient.protocol import const as mc
 from custom_components.meross_lan.merossclient.protocol.namespaces import (
-    hub as mn_h,
+    thermostat as mn_t,
 )
-from custom_components.meross_lan.schedule_sync import ScheduleSyncSensor
+from custom_components.meross_lan.schedule_sync import (
+    ScheduleHelperSelect as Select,
+    ScheduleSyncSensor as Sensor,
+)
 import emulator as emulator_module
-from emulator.mixins.hub import HubMixin
 
 from tests import const as tc, helpers
+from tests.schedule_helpers import (
+    HELPER_ENTITY_ID,
+    SCHEDULE_FULL,
+    async_schedule_context,
+)
 
 if TYPE_CHECKING:
     from typing import Any
@@ -38,8 +41,6 @@ if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
 MTS300_TRACE = "U01234567890123456789012345678925-Kpippo-mts300.json.txt"
-
-HELPER_ENTITY_ID = "schedule.heating"
 
 # verbatim from the msh300 trace (Appliance.Hub.Mts100.ScheduleB GETACK, subdevice 01008C11).
 # The emulator trace import merges these lists by their first item (duration) so that
@@ -57,62 +58,9 @@ MTS100_TRACE["wed"] = [
     [360, 105],
 ]
 
-# a full-coverage week (strings as accepted by the service schema)
-SCHEDULE_FULL: "dict[str, Any]" = {
-    day: [
-        {"from": "00:00", "to": "06:30", "data": {"temperature": 16}},
-        {"from": "06:30", "to": "08:00", "data": {"temperature": 21}},
-        {"from": "08:00", "to": "17:00", "data": {"temperature": 18}},
-        {"from": "17:00", "to": "22:30", "data": {"temperature": 21.5}},
-        {"from": "22:30", "to": "24:00", "data": {"temperature": 16}},
-    ]
-    for day in HA_SCHEDULE_WEEKDAY
-}
-
-
-def _get_mts100(context: helpers.DeviceContext):
-    climate = next(
-        subdevice
-        for subdevice in context.device.subdevices.values()  # type: ignore
-        if isinstance(subdevice, MtsClimate)
-    )
-    emulator = context.emulator
-    assert isinstance(emulator, HubMixin)
-    return climate, emulator
-
-
-def _emulator_schedule(emulator: HubMixin, climate: MtsClimate):
-    return emulator._get_subdevice_namespace(
-        climate.id, mn_h.Appliance_Hub_Mts100_ScheduleB
-    )
-
-
-async def _async_set_device_schedule(
-    context: helpers.DeviceContext, climate: MtsClimate, native: "dict[str, Any]"
-):
-    """Sets the emulated device schedule and refreshes the climate (calendar) state."""
-    emulator_state = _emulator_schedule(context.emulator, climate)  # type: ignore
-    for day in MTS_SCHEDULE_WEEKDAY:
-        emulator_state[day] = [list(entry) for entry in native[day]]
-    schedule = climate.schedule
-    schedule.handler_ns.schedule_get(schedule.index)
-    await context.hass.async_block_till_done()
-
-
-async def _call(hass: "HomeAssistant", service: str, entity_id: str, **data):
-    return await hass.services.async_call(
-        mlc.DOMAIN,
-        service,
-        {"entity_id": entity_id, **data},
-        blocking=True,
-        return_response=service == mlc.SERVICE_GET_SCHEDULE,
-    )
-
 
 async def test_schedule_services_registered(request, hass: "HomeAssistant"):
-    async with helpers.DeviceContext(
-        request, hass, mc.TYPE_MSH300, auto_poll=True
-    ) as context:
+    async with helpers.DeviceContext(request, hass, mc.TYPE_MSH300, auto_poll=True):
         for service in (
             mlc.SERVICE_GET_SCHEDULE,
             mlc.SERVICE_SET_SCHEDULE,
@@ -122,17 +70,16 @@ async def test_schedule_services_registered(request, hass: "HomeAssistant"):
 
 
 async def test_get_schedule(request, hass: "HomeAssistant"):
-    async with helpers.DeviceContext(
-        request, hass, mc.TYPE_MSH300, auto_poll=True
-    ) as context:
-        climate, emulator = _get_mts100(context)
-        await _async_set_device_schedule(context, climate, MTS100_TRACE)
+    async with async_schedule_context(request, hass) as ctx:
+        climate = ctx.climate
+        await ctx.async_set_device_schedule(MTS100_TRACE)
         ns_value = climate.schedule.ns_value
         assert native_equal(ns_value, MTS100_TRACE)
 
-        response = await _call(hass, mlc.SERVICE_GET_SCHEDULE, climate.entity_id)
+        response = await ctx.async_call(mlc.SERVICE_GET_SCHEDULE, climate.entity_id)
         assert response
         result: "dict[str, Any]" = response[climate.entity_id]  # type: ignore
+        assert result.keys() == {"schedule", "limits", "linked_helper"}
 
         assert result["schedule"] == decompile_schedule(
             ns_value, scale=climate.temperature_scale
@@ -149,9 +96,6 @@ async def test_get_schedule(request, hass: "HomeAssistant"):
             assert isinstance(block["data"]["temperature"], float)
         assert result["schedule"]["wednesday"][0]["data"]["temperature"] == 10.5
 
-        assert result["native"] == {
-            day: ns_value[day] for day in MTS_SCHEDULE_WEEKDAY if day in ns_value
-        }
         assert result["limits"] == {
             "unit_time": 15,
             "entry_count_max": 6,
@@ -161,52 +105,36 @@ async def test_get_schedule(request, hass: "HomeAssistant"):
             "max_temp": climate.max_temp,
             "temp_step": climate.target_temperature_step,
         }
-        assert result["schedule_mode_active"] is bool(climate.is_mts_scheduled())
         assert result["linked_helper"] is None
 
         # the 'schedule' key can be pasted back as set_schedule input
-        await _call(
-            hass,
-            mlc.SERVICE_SET_SCHEDULE,
-            climate.entity_id,
-            schedule=result["schedule"],
+        await ctx.async_call(
+            mlc.SERVICE_SET_SCHEDULE, climate.entity_id, schedule=result["schedule"]
         )
-        assert native_equal(_emulator_schedule(emulator, climate), ns_value)
+        assert native_equal(ctx.emulator_schedule(), ns_value)
 
-        # unsupported device payload (3-value entries like mts300)
-        await _async_set_device_schedule(
-            context,
-            climate,
-            {day: [[720, 180, 200], [720, 200, 220]] for day in MTS_SCHEDULE_WEEKDAY},
+        # unsupported device payload (3-value entries like mts300): device data,
+        # not a user input error
+        await ctx.async_set_device_schedule(
+            {day: [[720, 180, 200], [720, 200, 220]] for day in MTS_SCHEDULE_WEEKDAY}
         )
-        with pytest.raises(ServiceValidationError):
-            await _call(hass, mlc.SERVICE_GET_SCHEDULE, climate.entity_id)
+        with pytest.raises(HomeAssistantError) as excinfo:
+            await ctx.async_call(mlc.SERVICE_GET_SCHEDULE, climate.entity_id)
+        assert not isinstance(excinfo.value, ServiceValidationError)
 
 
 async def test_set_schedule(request, hass: "HomeAssistant"):
-    async with helpers.DeviceContext(
-        request, hass, mc.TYPE_MSH300, auto_poll=True
-    ) as context:
-        climate, emulator = _get_mts100(context)
+    async with async_schedule_context(request, hass) as ctx:
+        climate = ctx.climate
         schedule = climate.schedule
-        expected = compile_schedule(
-            SCHEDULE_FULL,
-            scale=climate.temperature_scale,
-            min_temp=climate.min_temp,
-            max_temp=climate.max_temp,
-            temp_step=climate.target_temperature_step,
-            unit_time=schedule._schedule_unit_time,
-            entry_count_max=schedule._schedule_entry_count_max,
-            entry_count_min=schedule._schedule_entry_count_min,
-        ).native
-        assert not native_equal(_emulator_schedule(emulator, climate), expected)
+        expected = ctx.compile(SCHEDULE_FULL)
+        assert not native_equal(ctx.emulator_schedule(), expected)
 
-        await _call(
-            hass, mlc.SERVICE_SET_SCHEDULE, climate.entity_id, schedule=SCHEDULE_FULL
+        await ctx.async_call(
+            mlc.SERVICE_SET_SCHEDULE, climate.entity_id, schedule=SCHEDULE_FULL
         )
-        emulator_state = _emulator_schedule(emulator, climate)
-        for day in MTS_SCHEDULE_WEEKDAY:
-            assert emulator_state[day] == expected[day]
+        assert len(ctx.set_payloads) == 1
+        assert ctx.emulator_schedule() == expected
         assert expected["mon"] == [
             [390, 160],
             [90, 210],
@@ -215,30 +143,62 @@ async def test_set_schedule(request, hass: "HomeAssistant"):
             [90, 160],
             [0, 160],
         ]
-
-        # the device schedule is refreshed after the write
+        # the device schedule is queried back after the write
         assert native_equal(schedule.ns_value, expected)
-        response = await _call(hass, mlc.SERVICE_GET_SCHEDULE, climate.entity_id)
+        response = await ctx.async_call(mlc.SERVICE_GET_SCHEDULE, climate.entity_id)
         assert response[climate.entity_id]["schedule"]["monday"] == SCHEDULE_FULL["monday"]  # type: ignore
 
-        # a write sets the sync controller reference payload
-        assert climate.select_schedule_helper
-        assert climate.select_schedule_helper._last_payload == expected
+        # a linked helper which differs reports drift (and is not re-written)
+        await ctx.select.async_select_option(HELPER_ENTITY_ID)
+        await ctx.async_tick(Select.SYNC_DELAY)
+        assert len(ctx.set_payloads) == 2
+        assert ctx.sensor_state().state == Sensor.STATE_SYNCED
+        await ctx.async_call(
+            mlc.SERVICE_SET_SCHEDULE, climate.entity_id, schedule=SCHEDULE_FULL
+        )
+        assert len(ctx.set_payloads) == 3
+        assert ctx.sensor_state().state == Sensor.STATE_DRIFT
+        await ctx.async_tick(Select.SYNC_DELAY)
+        assert len(ctx.set_payloads) == 3
+        assert ctx.emulator_schedule() == expected
+
+
+async def test_set_schedule_mts200(request, hass: "HomeAssistant"):
+    """Thermostat.Schedule (mts200: 'section' carries the slots per day)."""
+    emulator = helpers.build_emulator(mc.TYPE_MTS200)
+    # the trace carries no schedule: seed one
+    ns = mn_t.Appliance_Control_Thermostat_Schedule
+    emulator.namespaces[ns] = {
+        ns.key: [
+            {mc.KEY_CHANNEL: 0, mc.KEY_SECTION: 8}
+            | {day: [[1440, 200]] + [[0, 200]] * 7 for day in MTS_SCHEDULE_WEEKDAY}
+        ]
+    }
+    async with async_schedule_context(request, hass, emulator) as ctx:
+        climate = ctx.climate
+        assert climate.SCHEDULE_NS is ns
+        assert climate.schedule.limits["entry_count_max"] == 8
+        expected = ctx.compile(SCHEDULE_FULL)
+        await ctx.async_call(
+            mlc.SERVICE_SET_SCHEDULE, climate.entity_id, schedule=SCHEDULE_FULL
+        )
+        assert len(ctx.set_payloads) == 1
+        assert ctx.emulator_schedule() == expected
+        assert native_equal(climate.schedule.ns_value, expected)
+        response = await ctx.async_call(mlc.SERVICE_GET_SCHEDULE, climate.entity_id)
+        assert response[climate.entity_id]["schedule"] == SCHEDULE_FULL  # type: ignore
 
 
 async def test_set_schedule_invalid(request, hass: "HomeAssistant"):
-    async with helpers.DeviceContext(
-        request, hass, mc.TYPE_MSH300, auto_poll=True
-    ) as context:
-        climate, emulator = _get_mts100(context)
-        initial_state = deepcopy(_emulator_schedule(emulator, climate))
+    async with async_schedule_context(request, hass) as ctx:
+        entity_id = ctx.climate.entity_id
+        initial_state = deepcopy(ctx.emulator_schedule())
 
         # gap
         with pytest.raises(ServiceValidationError, match="not covered"):
-            await _call(
-                hass,
+            await ctx.async_call(
                 mlc.SERVICE_SET_SCHEDULE,
-                climate.entity_id,
+                entity_id,
                 schedule=SCHEDULE_FULL
                 | {
                     "monday": [
@@ -251,10 +211,9 @@ async def test_set_schedule_invalid(request, hass: "HomeAssistant"):
         # 7 distinct blocks on mts100 (scheduleBMode: 6)
         temperatures = (16, 17, 18, 19, 20, 21, 22)
         with pytest.raises(ServiceValidationError, match="exceed the device limit"):
-            await _call(
-                hass,
+            await ctx.async_call(
                 mlc.SERVICE_SET_SCHEDULE,
-                climate.entity_id,
+                entity_id,
                 schedule=SCHEDULE_FULL
                 | {
                     "tuesday": [
@@ -270,130 +229,90 @@ async def test_set_schedule_invalid(request, hass: "HomeAssistant"):
 
         # missing temperature
         with pytest.raises(ServiceValidationError, match="temperature"):
-            await _call(
-                hass,
+            await ctx.async_call(
                 mlc.SERVICE_SET_SCHEDULE,
-                climate.entity_id,
+                entity_id,
                 schedule=SCHEDULE_FULL | {"friday": [{"from": "00:00", "to": "24:00"}]},
             )
 
-        # partial week: every day is needed
-        with pytest.raises(ServiceValidationError, match="sunday"):
-            await _call(
-                hass,
+        # rejected by the service schema:
+        # partial week (every day is needed)
+        with pytest.raises(vol.Invalid, match="sunday"):
+            await ctx.async_call(
                 mlc.SERVICE_SET_SCHEDULE,
-                climate.entity_id,
+                entity_id,
                 schedule={
                     day: blocks
                     for day, blocks in SCHEDULE_FULL.items()
                     if day != "sunday"
                 },
             )
-
-        # invalid shape (missing 'to'): rejected by the service schema
+        # invalid block (missing 'to')
         with pytest.raises(vol.Invalid):
-            await _call(
-                hass,
+            await ctx.async_call(
                 mlc.SERVICE_SET_SCHEDULE,
-                climate.entity_id,
-                schedule={"monday": [{"from": "00:00", "data": {"temperature": 16}}]},
+                entity_id,
+                schedule=SCHEDULE_FULL
+                | {"monday": [{"from": "00:00", "data": {"temperature": 16}}]},
             )
-        # unknown weekday: rejected by the service schema
+        # unknown weekday
         with pytest.raises(vol.Invalid):
-            await _call(
-                hass,
+            await ctx.async_call(
                 mlc.SERVICE_SET_SCHEDULE,
-                climate.entity_id,
-                schedule={"mon": [{"from": "00:00", "to": "24:00"}]},
+                entity_id,
+                schedule=SCHEDULE_FULL | {"mon": [{"from": "00:00", "to": "24:00"}]},
             )
 
         # nothing was written
-        assert _emulator_schedule(emulator, climate) == initial_state
+        assert not ctx.set_payloads
+        assert ctx.emulator_schedule() == initial_state
 
 
-async def test_sync_schedule_not_linked(request, hass: "HomeAssistant"):
-    async with helpers.DeviceContext(
-        request, hass, mc.TYPE_MSH300, auto_poll=True
-    ) as context:
-        climate, emulator = _get_mts100(context)
-        with pytest.raises(ServiceValidationError, match="No schedule helper linked"):
-            await _call(hass, mlc.SERVICE_SYNC_SCHEDULE, climate.entity_id)
-
-
-# the schedule helper entity leaves a (time tracking) timer behind
-@pytest.mark.parametrize("expected_lingering_timers", [True])
 async def test_sync_schedule(request, hass: "HomeAssistant"):
-    """Linked helper happy path: relies on ScheduleHelperSelect.async_sync
-    (the sync controller)."""
-    assert await async_setup_component(
-        hass,
-        "schedule",
-        {
-            "schedule": {
-                "heating": {
-                    "name": "Heating",
-                    **{
-                        day: [
-                            {
-                                "from": block["from"],
-                                "to": (
-                                    "24:00:00"
-                                    if block["to"] == "24:00"
-                                    else block["to"]
-                                ),
-                                "data": block["data"],
-                            }
-                            for block in blocks
-                        ]
-                        for day, blocks in SCHEDULE_FULL.items()
-                    },
-                }
-            }
-        },
-    )
-    with (
-        patch.object(
-            MtsClimate.ScheduleHelperSelect,
-            "_attr_entity_registry_enabled_default",
-            True,
-        ),
-        patch.object(
-            MtsClimate.ScheduleSyncSensor, "_attr_entity_registry_enabled_default", True
-        ),
-    ):
-        async with helpers.DeviceContext(
-            request, hass, mc.TYPE_MSH300, auto_poll=True
-        ) as context:
-            climate, emulator = _get_mts100(context)
-            select = climate.select_schedule_helper
-            sensor = climate.sensor_schedule_sync
-            assert select and sensor
-            assert HELPER_ENTITY_ID in select.options
-            await select.async_select_option(HELPER_ENTITY_ID)
+    async with async_schedule_context(request, hass) as ctx:
+        climate = ctx.climate
+        with pytest.raises(ServiceValidationError, match="No schedule helper linked"):
+            await ctx.async_call(mlc.SERVICE_SYNC_SCHEDULE, climate.entity_id)
 
-            await _call(hass, mlc.SERVICE_SYNC_SCHEDULE, climate.entity_id)
+        select = ctx.select
+        await select.async_select_option(HELPER_ENTITY_ID)
+        # the service runs now (no debounce)
+        await ctx.async_call(mlc.SERVICE_SYNC_SCHEDULE, climate.entity_id)
+        assert len(ctx.set_payloads) == 1
+        expected = ctx.compile(await select._async_read_helper(HELPER_ENTITY_ID))
+        assert ctx.emulator_schedule() == expected
+        assert native_equal(climate.schedule.ns_value, expected)
+        assert ctx.sensor_state().state == Sensor.STATE_SYNCED
+        # forced: written even if unchanged
+        await ctx.async_call(mlc.SERVICE_SYNC_SCHEDULE, climate.entity_id)
+        assert len(ctx.set_payloads) == 2
+        response = await ctx.async_call(mlc.SERVICE_GET_SCHEDULE, climate.entity_id)
+        assert response[climate.entity_id]["linked_helper"] == HELPER_ENTITY_ID  # type: ignore
 
-            schedule = climate.schedule
-            expected = compile_schedule(
-                SCHEDULE_FULL,
-                scale=climate.temperature_scale,
-                min_temp=climate.min_temp,
-                max_temp=climate.max_temp,
-                temp_step=climate.target_temperature_step,
-                unit_time=schedule._schedule_unit_time,
-                entry_count_max=schedule._schedule_entry_count_max,
-                entry_count_min=schedule._schedule_entry_count_min,
-            ).native
-            emulator_state = _emulator_schedule(emulator, climate)
-            for day in MTS_SCHEDULE_WEEKDAY:
-                assert emulator_state[day] == expected[day]
-            assert sensor.native_value != ScheduleSyncSensor.STATE_ERROR
 
-            await context.time_mock.async_tick(select.REFRESH_DELAY)
-            assert native_equal(schedule.ns_value, expected)
-            assert sensor.native_value == ScheduleSyncSensor.STATE_SYNCED
-            response = await _call(hass, mlc.SERVICE_GET_SCHEDULE, climate.entity_id)
-            assert response[climate.entity_id]["linked_helper"] == HELPER_ENTITY_ID  # type: ignore
+async def test_sync_schedule_offline(request, hass: "HomeAssistant"):
+    """A forced sync deferred because the device is offline: the service fails
+    and the (still forced) retry writes once the device is back."""
+    async with async_schedule_context(request, hass) as ctx:
+        climate = ctx.climate
+        await ctx.select.async_select_option(HELPER_ENTITY_ID)
+        await ctx.async_tick(Select.SYNC_DELAY)
+        assert len(ctx.set_payloads) == 1
+        expected = ctx.emulator_schedule()
+        await ctx.async_set_device_schedule(
+            expected | {"mon": [[720, 200], [720, 220]] + [[0, 220]] * 4}
+        )
+        assert ctx.sensor_state().state == Sensor.STATE_DRIFT
+
+        with patch.object(ctx.context.device, "is_connected", False):
+            with pytest.raises(HomeAssistantError, match="sync will be retried"):
+                await ctx.async_call(mlc.SERVICE_SYNC_SCHEDULE, climate.entity_id)
+            assert ctx.sensor_state().state == Sensor.STATE_PENDING
+        assert len(ctx.set_payloads) == 1
+        await ctx.async_tick(Select.RETRY_DELAY)
+        assert len(ctx.set_payloads) == 2
+        assert ctx.emulator_schedule() == expected
+        assert ctx.sensor_state().state == Sensor.STATE_SYNCED
 
 
 async def test_schedule_services_unsupported(request, hass: "HomeAssistant"):
@@ -403,19 +322,13 @@ async def test_schedule_services_unsupported(request, hass: "HomeAssistant"):
         key=tc.MOCK_KEY,
         uuid=tc.MOCK_DEVICE_UUID,
     )
-    async with helpers.DeviceContext(
-        request, hass, emulator, auto_poll=True
-    ) as context:
-        climate = next(
-            entity
-            for entity in context.device.entities.values()
-            if isinstance(entity, MtsClimate)
-        )
-        assert not climate.SCHEDULE_SYNC_SUPPORTED
+    async with async_schedule_context(request, hass, emulator) as ctx:
+        climate = ctx.climate
+        assert climate.select_schedule_helper is None
         for service, data in (
             (mlc.SERVICE_GET_SCHEDULE, {}),
             (mlc.SERVICE_SET_SCHEDULE, {"schedule": SCHEDULE_FULL}),
             (mlc.SERVICE_SYNC_SCHEDULE, {}),
         ):
             with pytest.raises(ServiceValidationError, match="not supported"):
-                await _call(hass, service, climate.entity_id, **data)
+                await ctx.async_call(service, climate.entity_id, **data)

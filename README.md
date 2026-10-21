@@ -118,6 +118,65 @@ If you have the MSH300 Hub working with this integration, every new subdevice (t
 
 In general, many device configuration options available in Meross app are not supported in meross_lan though some are. As an example, the thermostats preset temperatures (for heat, cool, eco/away) are accessible in HA/meross_lan exactly as if you were to set them manually on the device or via the app. These, and any other supported configuration options, are available as configuration entities (so they're not added to the default lovelace dashboard) and you can access them by going to the relevant device page in HA Configuration -> Devices
 
+## Thermostat schedules: linking a Home Assistant Schedule helper
+
+Thermostats with an on-board weekly schedule (MTS100/MTS150 through the MSH300 hub, MTS200 and MTS960) can take their schedule from a Home Assistant [Schedule helper](https://www.home-assistant.io/integrations/schedule/) (`schedule.*`). This is a one-way bridge: the helper is converted and written to the device, which then runs it on its own. The calendar entity exposing the device schedule is still available. MTS300 is not supported since its schedule slots carry two setpoints (heat and cool).
+
+### Setup
+
+1. Create a Schedule helper (`Settings -> Devices & services -> Helpers -> Create helper -> Schedule`). Every day must be fully covered by touching blocks from 00:00 to 24:00 (no gaps): use a block for the 'setback' temperature too.
+2. Give every block a `temperature` in its additional data (e.g. `temperature: 21` in the 'Additional data' field of the helper block editor) or use a card that edits a temperature per block (such as the Heating Schedule Card).
+3. On the thermostat device page enable the 'Schedule helper' select and the 'Schedule sync' sensor (both are disabled by default).
+4. Pick the helper in the 'Schedule helper' select (the list follows the helpers existing in Home Assistant).
+
+The schedule is written to the device within a couple of seconds and written again whenever the helper is edited. The device only follows it while in schedule mode: climate preset `auto` on MTS100/MTS150/MTS200, `schedule_heating`/`schedule_cooling` on MTS960 (see the sensor `schedule_mode_active` attribute).
+
+The helper is adapted to the device limits and any adjustment is listed in the sensor `warnings` attribute:
+- block boundaries are rounded to the nearest 15 minutes (the MSH300 hub advertises its own `scheduleUnitTime` for its valves) and blocks collapsing to zero length are dropped
+- the number of slots per day is limited by the device (6 on MTS100/MTS150, 8 on MTS200, 12 on MTS960). Consecutive blocks with the same temperature count as one; a day exceeding the limit is an error
+- temperatures are clamped to the device range and snapped to 0.5 °C steps
+
+Times are wall-clock: HA local time maps 1:1 to the device local time, so ensure the device time zone matches HA (meross_lan raises a repair when it doesn't and the sensor exposes a `timezone_mismatch` attribute).
+
+### Schedule sync sensor
+
+- `off`: no helper linked
+- `pending`: write in progress, waiting for the device confirmation, device offline or device schedule not yet known (retried every minute). See the `reason` attribute
+- `synced`: the device schedule matches the helper
+- `drift`: the device schedule differs from the helper (e.g. it was changed in the Meross app or through the calendar entity). meross_lan does not overwrite it by itself: call `meross_lan.sync_schedule` (or select 'Off' and then the helper again) to push the helper. An automation triggered on `drift` can enforce this
+- `error`: the helper is unreadable or was removed, it doesn't compile (gap, overlap, missing temperature, too many slots) or the device write failed. `reason` carries the message: fix the helper or call `meross_lan.sync_schedule` to retry
+
+Attributes: `helper`, `reason`, `warnings`, `last_sync` (time of the last confirmed sync), `schedule_mode_active`, `timezone_mismatch`.
+
+### Schedule services
+
+These target meross_lan climate entities:
+- `meross_lan.get_schedule` returns (as action response, keyed by entity id) the device schedule as `schedule` (helper format), `native` (raw device payload), `limits` (time unit, slots per day, temperature range and step), `schedule_mode_active` and `linked_helper`.
+- `meross_lan.set_schedule` writes a schedule directly, without a helper. The format is the same as a YAML `schedule:` helper: all seven days are required and `to: "24:00"` ends the day. If a helper is linked and differs, the sensor will report `drift`.
+- `meross_lan.sync_schedule` re-reads the linked helper and writes it now, even when unchanged (this also overwrites a drifted device schedule).
+
+```yaml
+action: meross_lan.set_schedule
+target:
+  entity_id: climate.living_room
+data:
+  schedule:
+    monday:
+      - { from: "00:00", to: "06:30", data: { temperature: 17 } }
+      - { from: "06:30", to: "22:00", data: { temperature: 21 } }
+      - { from: "22:00", to: "24:00", data: { temperature: 17 } }
+    # tuesday ... sunday: same shape (every day is required)
+```
+
+To seed a helper from the current device schedule call `meross_lan.get_schedule` (`Developer tools -> Actions`) and copy the `schedule` values into the helper editor or into a YAML-defined `schedule:` entry: Home Assistant offers no way for an integration to write a helper. Keep in mind YAML-defined helpers are not editable in the UI.
+
+### Limitations
+
+- One-way only: changes made on the device are flagged as `drift`, never copied back to the helper.
+- The helper on/off state is not used: only its blocks and their `temperature` are.
+- A failed device write is not retried on a timer: the sensor stays `error` until the next sync pass (helper edited or re-linked, `meross_lan.sync_schedule` called, or the helper own state update at its next block boundary).
+- MTS300 is not supported.
+
 ## Service
 
 There is a service called `meross_lan.request` exposed to simplify communication with the device and play with it a bit. It basically requires the needed informations to setup a command request and send it over MQTT or HTTP without the hassle of signatures and timestamps computations. You can check it in the 'Developer Tools' of the HA instance, everything should be enough self-explanatory there.

@@ -15,6 +15,7 @@ from homeassistant.util import dt
 
 from .helpers import clamp
 from .helpers.entity import ParserEntity
+from .helpers.schedule import MTS_SCHEDULE_WEEKDAY
 from .merossclient.protocol import const as mc, namespaces as mn
 
 if TYPE_CHECKING:
@@ -30,7 +31,6 @@ if TYPE_CHECKING:
     MtsScheduleNativeMappingType = Mapping[str, Sequence[Sequence[int]]]
 
 
-MTS_SCHEDULE_WEEKDAY = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 MTS_SCHEDULE_RRULE = "FREQ=WEEKLY"
 
 

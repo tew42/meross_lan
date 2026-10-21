@@ -5,6 +5,7 @@ from homeassistant.components import climate, sensor
 from homeassistant.core import CoreState, callback
 from homeassistant.util.unit_conversion import TemperatureConverter
 
+from . import schedule_services
 from .calendar import MtsSchedule
 from .const import hac
 from .helpers import reverse_lookup
@@ -577,4 +578,8 @@ class MtsClimate(ParserEntity, climate.ClimateEntity):
         )
 
 
-async_setup_entry = MtsClimate.platform_setup_entry
+async def async_setup_entry(hass, config_entry, async_add_entities):
+    await MtsClimate.platform_setup_entry(hass, config_entry, async_add_entities)
+    schedule_services.async_register(
+        config_entry.runtime_data.platforms[MtsClimate.PLATFORM]
+    )

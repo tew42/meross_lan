@@ -122,3 +122,32 @@ request:
       default: '{}'
       selector:
         text:
+get_schedule:
+  name: Get schedule
+  description: Returns the weekly schedule stored in the thermostat (in Home Assistant schedule-helper format plus the raw device payload and limits)
+  target:
+    entity:
+      integration: meross_lan
+      domain: climate
+set_schedule:
+  name: Set schedule
+  description: "Writes a weekly schedule to the thermostat. Uses the Home Assistant schedule-helper format; each day must be fully covered by touching blocks and every block needs a 'temperature' in its data."
+  target:
+    entity:
+      integration: meross_lan
+      domain: climate
+  fields:
+    schedule:
+      name: Schedule
+      description: "Weekly schedule: {monday: [{from: '00:00', to: '06:30', data: {temperature: 16}}, {from: '06:30', to: '24:00', data: {temperature: 21}}], ...}"
+      required: true
+      example: '{"monday": [{"from": "00:00", "to": "06:30", "data": {"temperature": 16}}, {"from": "06:30", "to": "24:00", "data": {"temperature": 21}}]}'
+      selector:
+        object:
+sync_schedule:
+  name: Sync schedule
+  description: Re-reads the linked schedule helper and writes it to the thermostat now
+  target:
+    entity:
+      integration: meross_lan
+      domain: climate

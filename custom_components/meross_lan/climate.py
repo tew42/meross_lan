@@ -13,6 +13,8 @@ from .helpers.schedule import KEY_COOL, KEY_TEMPERATURE
 from .number import NumberParser
 from .schedule_sync import (
     ScheduleHelperSelect,
+    SchedulePullButton,
+    SchedulePushButton,
     ScheduleSyncSensor,
     schedule_device_fahrenheit,
 )
@@ -497,6 +499,8 @@ class MtsClimate(ParserEntity, climate.ClimateEntity):
         # sensor first: the select references it
         self.sensor_schedule_sync = cls.ScheduleSyncSensor(self)
         self.select_schedule_helper = cls.ScheduleHelperSelect(self)
+        SchedulePullButton(self.select_schedule_helper)
+        SchedulePushButton(self.select_schedule_helper)
         self.sensor_current_temperature = SensorParser(
             self,
             **(

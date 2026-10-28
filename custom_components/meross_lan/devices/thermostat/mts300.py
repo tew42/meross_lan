@@ -14,6 +14,7 @@ from . import (
     mn_t,
 )
 from ...helpers import reverse_lookup
+from ...helpers.schedule import KEY_COOL, KEY_HEAT
 from ...switch import EmulatedSwitch
 
 if TYPE_CHECKING:
@@ -99,6 +100,12 @@ class Mts300Climate(MtsThermostatClimate):
 
     # MtsClimate class attributes
     SCHEDULE_NS = mn_t.Appliance_Control_Thermostat_ScheduleB
+    # schedule entries carry [minutes, heat, cold], exposed as 'heat'/'cool'.
+    # Writing them is unconfirmed: only schedule reads were ever traced.
+    SCHEDULE_KEYS = (KEY_HEAT, KEY_COOL)
+    # The device reports no slot limit: 12 per day comes from a third-party
+    # copy of the MTS300 manual and a review (unconfirmed on hardware).
+    SCHEDULE_ENTRY_COUNT_MAX = 12
     # TODO: customize parsing of native payload since we have 2 temperatures
     MTS_MODE_TO_PRESET_MAP = {
         mc.MTS300_WORK_MANUAL: MtsThermostatClimate.Preset.CUSTOM,

@@ -122,3 +122,32 @@ request:
       default: '{}'
       selector:
         text:
+get_schedule:
+  name: Get schedule
+  description: "Returns the weekly schedule stored in the thermostat (schedule, in the Home Assistant schedule-helper format and unit), its limits (min_temp and max_temp in the Home Assistant unit; device_unit and temp_step, the grid temperatures are rounded to; keys; fahrenheit, true when Home Assistant uses Fahrenheit; unit_time in minutes; entry_count_max slots per day) and the linked schedule helper (linked_helper)"
+  target:
+    entity:
+      integration: meross_lan
+      domain: climate
+set_schedule:
+  name: Set schedule
+  description: "Writes a weekly schedule to the thermostat and returns the adjustments made as warnings; a linked schedule helper is then not written until edited or synced. Uses the Home Assistant schedule-helper format with temperatures in the Home Assistant unit system; every block needs a 'temperature' in its data (MTS300: 'heat' and 'cool', a missing one taking the value of the previous block). Time not covered by any block, omitted days included, is off (the device minimum temperature or, when cooling, its maximum) and takes a slot."
+  target:
+    entity:
+      integration: meross_lan
+      domain: climate
+  fields:
+    schedule:
+      name: Schedule
+      description: "Weekly schedule: {monday: [{from: '00:00', to: '06:30', data: {temperature: 16}}, {from: '06:30', to: '24:00', data: {temperature: 21}}], ...}. Quote the times in YAML: unquoted, 16:30 can be read as the number 990."
+      required: true
+      example: '{"monday": [{"from": "00:00", "to": "06:30", "data": {"temperature": 16}}, {"from": "06:30", "to": "24:00", "data": {"temperature": 21}}]}'
+      selector:
+        object:
+sync_schedule:
+  name: Sync schedule
+  description: Re-reads the linked schedule helper and writes it to the thermostat now, even when unchanged
+  target:
+    entity:
+      integration: meross_lan
+      domain: climate

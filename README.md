@@ -118,6 +118,24 @@ If you have the MSH300 Hub working with this integration, every new subdevice (t
 
 In general, many device configuration options available in Meross app are not supported in meross_lan though some are. As an example, the thermostats preset temperatures (for heat, cool, eco/away) are accessible in HA/meross_lan exactly as if you were to set them manually on the device or via the app. These, and any other supported configuration options, are available as configuration entities (so they're not added to the default lovelace dashboard) and you can access them by going to the relevant device page in HA Configuration -> Devices
 
+## Thermostat schedules: linking a Home Assistant Schedule helper
+
+Thermostats with an on-board weekly schedule (MTS100/MTS150 through the MSH300 hub, MTS200, MTS960 and, provisionally, MTS300) can follow a Home Assistant [Schedule helper](https://www.home-assistant.io/integrations/schedule/) (Home Assistant 2025.3 or later). The helper is converted and written to the device, which then runs it on its own. The sync is one-way: device schedule changes made elsewhere (e.g. in the Meross app) are reported as drift, not overwritten.
+
+To set it up, give every helper block a `temperature` in its 'Additional data' (e.g. `temperature: 21`, in your Home Assistant unit) or use a card editing it, such as the Heating Schedule Card, then pick the helper in the thermostat's 'Schedule helper' select ('Off' unlinks it). The helper is written within seconds and synced again on every edit or change of the thermostat's display unit, temperature limits or heating/cooling direction; a restart writes it only if it changed since the last write.
+
+About the conversion:
+- time not covered by any block is off: the device minimum temperature or, when cooling, its maximum (MTS300 `cool`, MTS200 summer mode; MTS960 unverified)
+- every block and every gap takes a device slot: at most 6 per day on MTS100/MTS150, 8 on MTS200, 12 on MTS960/MTS300
+- block boundaries are rounded to 15 minutes (30 on some hubs), temperatures to 0.5 °C or, on thermostats displaying °F, whole °F, except values the device already holds
+- the device follows the schedule only in schedule mode: preset `auto` (MTS960: `schedule_heating`/`schedule_cooling`)
+
+The 'Schedule sync' sensor reports `off`, `pending`, `synced`, `drift` (shown as 'Device differs') or `error`, with the cause in its `reason` attribute and the conversion adjustments in `warnings`. A helper shared by several thermostats must fit all of them, else none is written. After a Home Assistant unit system change, the sync reports an error until the helper temperatures are updated.
+
+With Home Assistant 2025.10 or later, the services `meross_lan.get_schedule`, `meross_lan.set_schedule` and `meross_lan.sync_schedule` read, write and resync the device schedule from automations: check them in 'Developer Tools'.
+
+MTS300 support is provisional: its blocks take `heat` and `cool` instead of `temperature`, and its schedule writes are still unconfirmed.
+
 ## Service
 
 There is a service called `meross_lan.request` exposed to simplify communication with the device and play with it a bit. It basically requires the needed informations to setup a command request and send it over MQTT or HTTP without the hassle of signatures and timestamps computations. You can check it in the 'Developer Tools' of the HA instance, everything should be enough self-explanatory there.

@@ -15,6 +15,7 @@ from homeassistant.util import dt
 
 from .helpers import clamp
 from .helpers.entity import ParserEntity
+from .helpers.schedule import MTS_SCHEDULE_WEEKDAY
 from .merossclient.protocol import const as mc, namespaces as mn
 
 if TYPE_CHECKING:
@@ -30,7 +31,6 @@ if TYPE_CHECKING:
     MtsScheduleNativeMappingType = Mapping[str, Sequence[Sequence[int]]]
 
 
-MTS_SCHEDULE_WEEKDAY = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 MTS_SCHEDULE_RRULE = "FREQ=WEEKLY"
 
 
@@ -149,6 +149,15 @@ class MtsSchedule(ParserEntity, calendar.CalendarEntity):
     def set_unavailable(self):
         self._schedule = mn.EMPTY_DICT
         super().set_unavailable()
+
+    @property
+    def limits(self) -> "dict[str, int]":
+        """The device schedule limits (named as the compile_schedule kwargs)."""
+        return {
+            "unit_time": self._schedule_unit_time,
+            "entry_count_max": self._schedule_entry_count_max,
+            "entry_count_min": self._schedule_entry_count_min,
+        }
 
     # interface: Calendar
     @property

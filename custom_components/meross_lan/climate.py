@@ -9,7 +9,13 @@ from .calendar import MtsSchedule
 from .const import hac, HA_VERSION
 from .helpers import reverse_lookup
 from .helpers.entity import ParserEntity
+from .helpers.schedule import KEY_COOL, KEY_TEMPERATURE
 from .number import NumberParser
+from .schedule_sync import (
+    ScheduleHelperSelect,
+    ScheduleSyncSensor,
+    schedule_device_fahrenheit,
+)
 from .select import SelectEntity
 from .sensor import SensorParser
 
@@ -300,6 +306,11 @@ class MtsClimate(ParserEntity, climate.ClimateEntity):
                     climate.native_temperature_unit,
                 )
 
+    ScheduleHelperSelect = ScheduleHelperSelect
+    """Links a HA schedule helper to the device schedule. Overridable in derived."""
+    ScheduleSyncSensor = ScheduleSyncSensor
+    """Diagnostic status of the schedule helper sync. Overridable in derived."""
+
     if TYPE_CHECKING:
         ns_value: mt.JsonMapping
         ATTR_HVAC_MODE: Final
@@ -309,6 +320,12 @@ class MtsClimate(ParserEntity, climate.ClimateEntity):
 
         SCHEDULE_NS: ClassVar[mn.Namespace]
         Schedule: ClassVar[type[MtsSchedule]]
+        SCHEDULE_KEYS: ClassVar[tuple[str, ...]]
+        """Schedule helper block data keys carried (in order) by the device
+        schedule entries ([minutes, *values])."""
+        SCHEDULE_ENTRY_COUNT_MAX: ClassVar[int | None]
+        """Max schedule entries per day used when the device reports no limit.
+        Only used to compile the schedule helper."""
         TARGET_TEMPERATURE_STEP: ClassVar[float]
         MTS_MODE_TO_PRESET_MAP: ClassVar[dict[int | None, str]]
         """Maps device 'mode' value to the HA climate.preset_mode"""
@@ -328,7 +345,9 @@ class MtsClimate(ParserEntity, climate.ClimateEntity):
         number_preset_temperature: Final[tuple[SetPointNumber, ...]]
         schedule: Final[MtsSchedule]
         select_track_sensor: Final[TrackSensorSelect]
+        select_schedule_helper: Final[ScheduleHelperSelect]
         sensor_current_temperature: Final[SensorParser]
+        sensor_schedule_sync: Final[ScheduleSyncSensor]
         _mts_active: bool | int
         _mts_mode: int
         _mts_onoff: int
@@ -364,7 +383,9 @@ class MtsClimate(ParserEntity, climate.ClimateEntity):
     HVACAction = climate.HVACAction
     HVACMode = climate.HVACMode
 
+    SCHEDULE_KEYS = (KEY_TEMPERATURE,)
     TARGET_TEMPERATURE_STEP = 0.5
+    SCHEDULE_ENTRY_COUNT_MAX = None
     MTS_MODE_TO_TEMPERATUREKEY_MAP = {}
     SETPOINT_ICON_MAP = {
         Preset.COMFORT: "mdi:sun-thermometer",
@@ -389,8 +410,10 @@ class MtsClimate(ParserEntity, climate.ClimateEntity):
     _AUTO_DESTROY = (
         "number_adjust_temperature",
         "schedule",
+        "select_schedule_helper",
         "select_track_sensor",
         "sensor_current_temperature",
+        "sensor_schedule_sync",
     )
     __slots__ = (
         "current_humidity",
@@ -471,6 +494,9 @@ class MtsClimate(ParserEntity, climate.ClimateEntity):
         self.parent.enable_check_device_time()  # useful for schedule entity times
 
         self.select_track_sensor = cls.TrackSensorSelect(self)
+        # sensor first: the select references it
+        self.sensor_schedule_sync = cls.ScheduleSyncSensor(self)
+        self.select_schedule_helper = cls.ScheduleHelperSelect(self)
         self.sensor_current_temperature = SensorParser(
             self,
             **(
@@ -543,6 +569,30 @@ class MtsClimate(ParserEntity, climate.ClimateEntity):
 
     def is_mts_scheduled(self, /):
         raise NotImplementedError()
+
+    def schedule_limits_known(self, /) -> bool:
+        """True when the device schedule (and so its limits) and the other compile
+        inputs (device unit, off values) are known so that a schedule can be
+        compiled for (and written to) the device."""
+        return bool(self.schedule.ns_value) and (
+            schedule_device_fahrenheit(self) is not None
+        )
+
+    def schedule_off_values(self, /) -> list[int]:
+        """The device (scaled) values of the schedule time not covered by the
+        helper blocks (off): max_temp for 'cool', min_temp for the other keys."""
+        return [
+            round(
+                (self.max_temp if key == KEY_COOL else self.min_temp)
+                * self.temperature_scale
+            )
+            for key in self.SCHEDULE_KEYS
+        ]
+
+    def is_device_connected(self, /) -> bool:
+        """The device carrying this climate is online (hub valves override this:
+        they can be offline while the hub is online)."""
+        return self.parent.is_connected
 
     def _update_current_temperature(self, native_current_temperature: float | int, /):
         """

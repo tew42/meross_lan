@@ -336,6 +336,25 @@ class Mts960Climate(MtsThermostatClimate):
     def is_mts_scheduled(self):
         return self._mts_onoff and (self._mts_mode == mc.MTS960_MODE_SCHEDULE)
 
+    @override
+    def schedule_limits_known(self, /):
+        # the off values depend on the working mode (see schedule_off_values)
+        return super().schedule_limits_known() and self._mts_working is not None
+
+    @override
+    def schedule_off_values(self, /):
+        # one schedule for both directions: off is the bound of the working one
+        return [
+            round(
+                (
+                    self.max_temp
+                    if self._mts_working == mc.MTS960_WORKING_COOL
+                    else self.min_temp
+                )
+                * self.temperature_scale
+            )
+        ]
+
     # interface: self
     async def _async_request_timer(self, timer_type: int, payload: dict, /):
         await self.parent.ns_handlers[
@@ -407,8 +426,13 @@ class Mts960Climate(MtsThermostatClimate):
             "ctlMin": 300,
         }
         """
-        self.max_temp = payload[mc.KEY_CTLMAX] / self.temperature_scale
-        self.min_temp = payload[mc.KEY_CTLMIN] / self.temperature_scale
+        max_temp = payload[mc.KEY_CTLMAX] / self.temperature_scale
+        min_temp = payload[mc.KEY_CTLMIN] / self.temperature_scale
+        if (self.max_temp, self.min_temp) != (max_temp, min_temp):
+            self.max_temp = max_temp
+            self.min_temp = min_temp
+            # the schedule sync (compile bounds) is notified by the flush
+            self.flush_state()
 
     def _parse_timer(self, payload: "mt.thermostat.Timer_C", /):
         """

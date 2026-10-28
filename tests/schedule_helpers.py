@@ -14,7 +14,6 @@ from pytest_homeassistant_custom_component.common import (
 )
 
 from custom_components.meross_lan import const as mlc
-from custom_components.meross_lan.calendar import MtsSchedule
 from custom_components.meross_lan.climate import MtsClimate
 from custom_components.meross_lan.helpers.schedule import (
     HA_SCHEDULE_WEEKDAY,
@@ -29,6 +28,7 @@ from custom_components.meross_lan.merossclient.protocol.namespaces import (
     thermostat as mn_t,
 )
 from custom_components.meross_lan.schedule_sync import (
+    MtsSchedule,
     ScheduleHelperSelect,
     schedule_compile_kwargs,
 )
@@ -224,7 +224,7 @@ class ScheduleContext:
         self, native: "dict[str, Any]", climate: MtsClimate | None = None
     ):
         """Changes the emulated device schedule (as if done in the Meross app)
-        and lets the climate (calendar) entity know about it."""
+        and lets the climate schedule know about it."""
         climate = climate or self.climate
         p_state = self._emulator_ns_state(climate)
         for day in MTS_SCHEDULE_WEEKDAY:

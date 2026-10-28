@@ -19,7 +19,6 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockUser
 
 from custom_components.meross_lan import const as mlc
-from custom_components.meross_lan.calendar import MtsSchedule
 from custom_components.meross_lan.devices.thermostat import (
     MtsSummerMode,
     MtsTempUnit,
@@ -35,6 +34,7 @@ from custom_components.meross_lan.merossclient.protocol.namespaces import (
     thermostat as mn_t,
 )
 from custom_components.meross_lan.schedule_sync import (
+    MtsSchedule,
     ScheduleHelperSelect as Select,
     ScheduleSyncSensor as Sensor,
     _helper_storage,
@@ -42,7 +42,7 @@ from custom_components.meross_lan.schedule_sync import (
 )
 import emulator as emulator_module
 
-from tests import const as tc
+from tests import const as tc, helpers
 from tests.schedule_helpers import (
     DRIFTED_DAY,
     HELPER_BLOCKS_MTS300,
@@ -1185,3 +1185,18 @@ async def test_schedule_sync_select_removed(request, hass: "HomeAssistant"):
         state = ctx.sensor_state()
         assert state.state == Sensor.STATE_OFF
         assert Sensor.ATTR_HELPER not in state.attributes
+
+
+async def test_calendar_entities_removed(request, hass: "HomeAssistant"):
+    """The orphaned registry entries of the removed calendar entity are dropped
+    on setup."""
+    async with helpers.DeviceContext(request, hass, mc.TYPE_MTS200) as context:
+        ent_reg = er.async_get(hass)
+        calendar = ent_reg.async_get_or_create(
+            "calendar",
+            mlc.DOMAIN,
+            f"{context.device_id}_0_schedule",
+            config_entry=context.config_entry,
+        )
+        await context.perform_coldstart()
+        assert not ent_reg.async_get(calendar.entity_id)

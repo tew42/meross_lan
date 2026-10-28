@@ -265,7 +265,7 @@ def compile_schedule(
     - entry_count_max: max number of entries per day (off ones included),
       padding excluded (0 = unlimited).
     - entry_count_min: days with fewer entries are padded with zero-duration
-      entries repeating the first entry values (as the calendar entity does).
+      entries repeating the first entry values.
     - keys: with more than one key a block missing a value takes the one of the
       previous (not dropped) block in time (see _carry_forward) and 'heat' must
       be below 'cool'.

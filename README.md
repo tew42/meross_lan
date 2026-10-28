@@ -138,6 +138,8 @@ With Home Assistant 2025.10 or later, the services `meross_lan.get_schedule`, `m
 
 MTS300 support is provisional: its blocks take `heat` and `cool` instead of `temperature`, and its schedule writes are still unconfirmed.
 
+The former thermostat 'Schedule' calendar entity was removed: the Schedule helper replaces it (leftover calendar entities are deleted automatically).
+
 ## Service
 
 There is a service called `meross_lan.request` exposed to simplify communication with the device and play with it a bit. It basically requires the needed informations to setup a command request and send it over MQTT or HTTP without the hassle of signatures and timestamps computations. You can check it in the 'Developer Tools' of the HA instance, everything should be enough self-explanatory there.
